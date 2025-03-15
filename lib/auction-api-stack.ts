@@ -56,10 +56,12 @@ export class AuctionApiStack extends Stack {
       environment: {
         ITEMS_TABLE: props.itemsTable.tableName,
         AUCTIONS_TABLE: props.auctionsTable.tableName,
+        IMAGES_TABLE: props.imagesTable.tableName,
       },
     });
     props.itemsTable.grantReadWriteData(itemsLambda);
-    props.auctionsTable.grantReadData(itemsLambda); // if you need to validate auction existence
+    props.auctionsTable.grantReadData(itemsLambda);
+    props.imagesTable.grantReadData(itemsLambda);
 
     // Images Lambda
     const imagesLambda = new NodejsFunction(this, 'ImagesLambda', {
@@ -161,15 +163,15 @@ export class AuctionApiStack extends Stack {
     });
     this.httpApi.addRoutes({
       path: '/auctions/{auctionId}/items',
-      methods: [HttpMethod.GET],
+      methods: [HttpMethod.GET, HttpMethod.POST],
       integration: auctionsIntegration,
       authorizer
-    })
+    });
 
     // items
     this.httpApi.addRoutes({
       path: '/items',
-      methods: [HttpMethod.POST], // create new item
+      methods: [HttpMethod.GET, HttpMethod.POST],
       integration: itemsIntegration,
       authorizer,
     });

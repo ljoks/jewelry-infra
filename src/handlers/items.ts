@@ -4,6 +4,7 @@ import { DynamoDB } from 'aws-sdk';
 const dynamo = new DynamoDB.DocumentClient();
 const ITEMS_TABLE = process.env.ITEMS_TABLE!;
 const AUCTIONS_TABLE = process.env.AUCTIONS_TABLE!;
+const IMAGES_TABLE = process.env.IMAGES_TABLE!;
 
 export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, context: Context) {
   try {
@@ -20,17 +21,8 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
       const { item_id, auction_id, marker_id, item_title, description, created_by } = body;
 
       // Validate required fields
-      if (!item_id || !auction_id) {
-        return buildResponse(400, { error: 'item_id, auction_id are required' });
-      }
-
-      // (Optional) Check if the auction exists
-      const auctionCheck = await dynamo.get({
-        TableName: AUCTIONS_TABLE,
-        Key: { auction_id },
-      }).promise();
-      if (!auctionCheck.Item) {
-        return buildResponse(400, { error: `Auction ${auction_id} does not exist` });
+      if (!item_id) {
+        return buildResponse(400, { error: 'item_id is required' });
       }
 
       const now = new Date().toISOString();
@@ -38,7 +30,7 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
         TableName: ITEMS_TABLE,
         Item: {
           item_id,
-          auction_id,
+          auction_id: auction_id || null, // Make auction_id optional
           marker_id,
           item_title,
           description,
@@ -112,6 +104,82 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
         Key: { item_id: pathParameters.itemId }
       }).promise();
       return buildResponse(200, { message: 'Item deleted' });
+    }
+
+    if (routeKey === 'GET /items') {
+      // Get all items with optional sorting
+      const queryParams = event.queryStringParameters || {};
+      const sortBy = queryParams.sortBy || 'price'; // default sort by price
+      const sortOrder = queryParams.sortOrder || 'desc'; // default highest first
+      const auctionId = queryParams.auctionId; // optional filter by auction
+
+      let dbQuery;
+
+      if (auctionId) {
+        // If filtering by auction, use query with GSI
+        dbQuery = {
+          TableName: ITEMS_TABLE,
+          IndexName: 'auctionIdIndex',
+          KeyConditionExpression: 'auction_id = :auctionId',
+          ExpressionAttributeValues: {
+            ':auctionId': auctionId
+          }
+        };
+      } else {
+        // Otherwise, scan all items
+        dbQuery = {
+          TableName: ITEMS_TABLE
+        };
+      }
+
+      const data = await dynamo[auctionId ? 'query' : 'scan'](dbQuery).promise();
+      let items = data.Items || [];
+
+      // Fetch images for each item
+      for (let item of items) {
+        const imagesResult = await dynamo.query({
+          TableName: IMAGES_TABLE,
+          IndexName: 'itemIdIndex',
+          KeyConditionExpression: 'item_id = :itemId',
+          ExpressionAttributeValues: { ':itemId': item.item_id }
+        }).promise();
+
+        // Add the first image as the primary display image
+        if (imagesResult.Items && imagesResult.Items.length > 0) {
+          item.primaryImage = imagesResult.Items[0].s3_key_original;
+        }
+        
+        // Add all images to the item
+        item.images = imagesResult.Items || [];
+      }
+
+      // Sort items
+      items.sort((a, b) => {
+        const aValue = a[sortBy];
+        const bValue = b[sortBy];
+
+        if (typeof aValue === 'number' && typeof bValue === 'number') {
+          return sortOrder === 'desc' ? bValue - aValue : aValue - bValue;
+        }
+        
+        if (typeof aValue === 'string' && typeof bValue === 'string') {
+          return sortOrder === 'desc' 
+            ? bValue.localeCompare(aValue) 
+            : aValue.localeCompare(bValue);
+        }
+
+        // If values are undefined or mixed types, push them to the end
+        if (aValue === undefined) return 1;
+        if (bValue === undefined) return -1;
+        return 0;
+      });
+
+      return buildResponse(200, {
+        items,
+        count: items.length,
+        sortBy,
+        sortOrder
+      });
     }
 
     return buildResponse(404, { error: 'Route not found' });

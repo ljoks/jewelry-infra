@@ -174,6 +174,57 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
       return buildResponse(200, { message: 'Auction deleted' });
     }
 
+    if (routeKey === 'POST /auctions/{auctionId}/items') {
+      // Associate items with an auction
+      if (!event.body || !pathParameters?.auctionId) {
+        return buildResponse(400, { error: 'Missing body or auctionId' });
+      }
+
+      const body = JSON.parse(event.body);
+      const { item_ids } = body;
+      const auctionId = pathParameters.auctionId;
+
+      if (!Array.isArray(item_ids) || item_ids.length === 0) {
+        return buildResponse(400, { error: 'item_ids array is required and must not be empty' });
+      }
+
+      // Check if auction exists
+      const auctionCheck = await dynamo.get({
+        TableName: AUCTIONS_TABLE,
+        Key: { auction_id: auctionId }
+      }).promise();
+
+      if (!auctionCheck.Item) {
+        return buildResponse(404, { error: 'Auction not found' });
+      }
+
+      // Update each item to associate it with the auction
+      const now = new Date().toISOString();
+      const updatePromises = item_ids.map(itemId => 
+        dynamo.update({
+          TableName: ITEMS_TABLE,
+          Key: { item_id: itemId },
+          UpdateExpression: 'SET auction_id = :auctionId, updated_at = :updatedAt',
+          ExpressionAttributeValues: {
+            ':auctionId': auctionId,
+            ':updatedAt': now
+          },
+          ReturnValues: 'ALL_NEW'
+        }).promise()
+      );
+
+      try {
+        const results = await Promise.all(updatePromises);
+        return buildResponse(200, { 
+          message: 'Items associated with auction',
+          items: results.map(result => result.Attributes)
+        });
+      } catch (error) {
+        console.error('Error updating items:', error);
+        return buildResponse(500, { error: 'Failed to update some items' });
+      }
+    }
+
     return buildResponse(404, { error: 'Route not found' });
   } catch (err) {
     console.error(err);
