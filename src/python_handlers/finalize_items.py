@@ -58,8 +58,8 @@ def lambda_handler(event, context):
         auction_id = body.get("auction_id")
         groups = body.get("groups", [])
 
-        if not auction_id or not groups:
-            return build_response(400, {"error": "auction_id and groups[] are required."})
+        if not groups:
+            return build_response(400, {"error": "groups[] is required."})
 
         created_items = []
 
@@ -96,7 +96,9 @@ def lambda_handler(event, context):
                 cropped_img = remove_item_marker(original_img)
 
                 # 4) Upload the cropped image
-                cropped_key = f"cropped/{auction_id}/{item_id}-{now_ts}-{time.time_ns()}.jpg"
+                # If no auction_id, store in a general inventory folder
+                folder = f"cropped/{auction_id if auction_id else 'inventory'}"
+                cropped_key = f"{folder}/{item_id}-{now_ts}-{time.time_ns()}.jpg"
                 upload_cropped_image(cropped_img, BUCKET_NAME, cropped_key)
 
                 # 5) Delete original
@@ -114,7 +116,6 @@ def lambda_handler(event, context):
             # 7) Insert the final item in DynamoDB
             item_data = {
                 "item_id": item_id,
-                "auction_id": auction_id,
                 "marker_id": marker_id,
                 "metadata": metadata,
                 "images": cropped_image_keys,
@@ -122,18 +123,28 @@ def lambda_handler(event, context):
                 "created_at": now_ts,
                 "updated_at": now_ts
             }
+            
+            # Only include auction_id if it was provided
+            if auction_id:
+                item_data["auction_id"] = auction_id
+
             items_table.put_item(Item=item_data)
 
-            # 8) Insert images in the ImagesTable (optional)
+            # 8) Insert images in the ImagesTable
             for ckey in cropped_image_keys:
                 image_id = generate_image_id()
-                images_table.put_item(Item={
+                image_data = {
                     "image_id": image_id,
                     "item_id": item_id,
-                    "auction_id": auction_id,
                     "s3_key_original": ckey,
                     "created_at": now_ts
-                })
+                }
+                
+                # Only include auction_id if it was provided
+                if auction_id:
+                    image_data["auction_id"] = auction_id
+                    
+                images_table.put_item(Item=image_data)
 
             created_items.append(item_data)
 

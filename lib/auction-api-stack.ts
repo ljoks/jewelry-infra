@@ -45,7 +45,7 @@ export class AuctionApiStack extends Stack {
     });
     props.auctionsTable.grantReadWriteData(auctionsLambda);
     props.imagesBucket.grantRead(auctionsLambda);
-    props.itemsTable.grantReadData(auctionsLambda);
+    props.itemsTable.grantReadWriteData(auctionsLambda);
     props.imagesTable.grantReadData(auctionsLambda);
 
     // Items Lambda
