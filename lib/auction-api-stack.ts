@@ -113,6 +113,21 @@ export class AuctionApiStack extends Stack {
     props.imagesTable.grantReadWriteData(finalizeItemsLambda);
     openAiSecret.grantRead(finalizeItemsLambda);
 
+    // Export Catalog Lambda
+    const exportCatalogLambda = new LambdaFunction(this, 'ExportCatalogLambda', {
+      runtime: Runtime.PYTHON_3_9,
+      code: Code.fromAsset('src/python_handlers'),
+      handler: 'export_catalog.lambda_handler',
+      environment: {
+        BUCKET_NAME: props.imagesBucket.bucketName,
+        ITEMS_TABLE: props.itemsTable.tableName,
+        IMAGES_TABLE: props.imagesTable.tableName,
+      },
+      timeout: Duration.seconds(30)
+    });
+    props.imagesBucket.grantReadWrite(exportCatalogLambda);
+    props.itemsTable.grantReadData(exportCatalogLambda);
+    props.imagesTable.grantReadData(exportCatalogLambda);
 
     // 2. Create the HTTP API
     this.httpApi = new HttpApi(this, 'AuctionServiceApi', {
@@ -146,6 +161,7 @@ export class AuctionApiStack extends Stack {
     const imagesIntegration = new HttpLambdaIntegration("ImagesIntegration", imagesLambda);
     const groupImagesIntegration = new HttpLambdaIntegration("GroupImagesIntegration", groupImagesLambda);
     const FinalizeItemsIntegration = new HttpLambdaIntegration("FinalizeItemsIntegration", finalizeItemsLambda);
+    const ExportCatalogIntegration = new HttpLambdaIntegration("ExportCatalogIntegration", exportCatalogLambda);
 
     // 5. Define Routes + Require Cognito Auth
     // auctions
@@ -214,6 +230,14 @@ export class AuctionApiStack extends Stack {
       path: '/finalizeItems',
       methods: [HttpMethod.POST],
       integration: FinalizeItemsIntegration,
+      authorizer,
+    });
+
+    // Export catalog route
+    this.httpApi.addRoutes({
+      path: '/export/catalog',
+      methods: [HttpMethod.POST],
+      integration: ExportCatalogIntegration,
       authorizer,
     });
 

@@ -110,8 +110,8 @@ def lambda_handler(event, context):
 
                 cropped_image_keys.append(cropped_key)
 
-            # 6) Generate item description
-            description = generate_description(cropped_image_keys, metadata)
+            # Generate all item details in a single API call
+            item_details = generate_item_details(cropped_image_keys, metadata)
 
             # 7) Insert the final item in DynamoDB
             item_data = {
@@ -119,13 +119,15 @@ def lambda_handler(event, context):
                 "marker_id": marker_id,
                 "metadata": metadata,
                 "images": cropped_image_keys,
-                "description": description,
+                "title": item_details["title"],
+                "description": item_details["description"],
+                "value_estimate": item_details["value_estimate"],
                 "created_at": now_ts,
                 "updated_at": now_ts
             }
             
-            # Only include auction_id if it was provided
-            if auction_id:
+            # Only include auction_id if it was provided and not empty/None
+            if auction_id and auction_id.strip():
                 item_data["auction_id"] = auction_id
 
             items_table.put_item(Item=item_data)
@@ -140,8 +142,8 @@ def lambda_handler(event, context):
                     "created_at": now_ts
                 }
                 
-                # Only include auction_id if it was provided
-                if auction_id:
+                # Only include auction_id if it was provided and not empty/None
+                if auction_id and auction_id.strip():
                     image_data["auction_id"] = auction_id
                     
                 images_table.put_item(Item=image_data)
@@ -235,20 +237,18 @@ def upload_cropped_image(cropped_image: np.ndarray, bucket: str, key: str):
     )
 
 
-import requests
-
-import requests
-
-def generate_description(cropped_image_keys, metadata) -> str:
+def generate_item_details(cropped_image_keys, metadata) -> dict:
     """
-    Adapts the /api/generateDescriptions logic from the original Flask code:
-    - Build a prompt referencing the images
-    - Call the OpenAI Chat Completions endpoint
-    - Return the model's response
+    Generate title, description, and value estimate for an item in a single API call.
+    Uses OpenAI's API to analyze the images and create all necessary details.
     """
     openai_api_key = get_api_key()
     if not openai_api_key:
-        return "No description (missing OpenAI key)"
+        return {
+            "title": "Untitled Item",
+            "description": "No description (missing OpenAI key)",
+            "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+        }
 
     # Construct image URLs from S3 keys
     image_urls = [
@@ -256,12 +256,27 @@ def generate_description(cropped_image_keys, metadata) -> str:
         for k in cropped_image_keys
     ]
 
-    # Construct prompt text
-    prompt_text = "You are an expert jewelry marketer. Based on these images, generate a marketing-friendly description. Please use plain text."
-    
+    # Construct prompt text that asks for all three components
+    prompt_text = """You are an expert jewelry appraiser and marketer. Based on these images, provide the following details in JSON format:
+
+1. A concise title (maximum 60 characters) highlighting key features
+2. A marketing-friendly description of the piece in plaintext
+3. A value estimate considering materials, craftsmanship, condition, design complexity, and market trends
+
+Respond in this exact JSON format:
+{
+    "title": "<concise title>",
+    "description": "<marketing description>",
+    "value_estimate": {
+        "min_value": <number>,
+        "max_value": <number>,
+        "currency": "USD",
+    }
+}"""
+
     # Append metadata if available
     if metadata:
-        prompt_text += f"\nMetadata:\n{metadata}"
+        prompt_text += f"\n\nMetadata:\n{metadata}"
 
     # Create the messages payload
     messages = [
@@ -273,9 +288,9 @@ def generate_description(cropped_image_keys, metadata) -> str:
 
     # Construct the request payload
     payload = {
-        "model": "gpt-4o-mini",  # or your chosen model
+        "model": "gpt-4o-mini",
         "messages": messages,
-        "max_tokens": 300
+        "max_tokens": 1000
     }
 
     headers = {
@@ -287,26 +302,96 @@ def generate_description(cropped_image_keys, metadata) -> str:
         resp = requests.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
         if resp.status_code != 200:
             print("OpenAI Error:", resp.text)
-            return "Failed to generate description (OpenAI error)."
+            return {
+                "title": "Untitled Item",
+                "description": "Failed to generate description (OpenAI error).",
+                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+            }
+        print(resp.json())
+        
         data = resp.json()
-        model_output = data["choices"][0]["message"]["content"]
+        if not data.get("choices") or not data["choices"]:
+            print("OpenAI Error: No choices in response")
+            return {
+                "title": "Untitled Item",
+                "description": "Failed to generate description (no response).",
+                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+            }
 
-        # Fixed disclaimer to be appended
+        content = data["choices"][0]["message"]["content"]
+        if not content:
+            print("OpenAI Error: Empty content in response")
+            return {
+                "title": "Untitled Item",
+                "description": "Failed to generate description (empty response).",
+                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+            }
+
+        # Clean the content by removing markdown code blocks if present
+        content = content.strip()
+        if content.startswith('```json'):
+            content = content[7:]  # Remove ```json
+        if content.endswith('```'):
+            content = content[:-3]  # Remove ```
+        content = content.strip()
+
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError as e:
+            print(f"OpenAI Error: Failed to parse JSON response: {e}")
+            print(f"Raw content: {content}")
+            return {
+                "title": "Untitled Item",
+                "description": "Failed to generate description (invalid response format).",
+                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+            }
+        
+        # Validate required fields
+        if not all(key in result for key in ["title", "description", "value_estimate"]):
+            print("OpenAI Error: Missing required fields in response")
+            return {
+                "title": "Untitled Item",
+                "description": "Failed to generate description (incomplete response).",
+                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+            }
+        
+        # Add disclaimer to description
         DISCLAIMER_PHRASE = (
             "All photos represent the lot condition and may contain unseen imperfections in addition to "
             "the information provided. All items are described to the best of our abilities. Please "
             "communicate all questions and concerns prior to bidding. Please read our terms and "
             "conditions for more details. Good luck bidding."
         )
-
-        # Append disclaimer
-        final_description = f"{model_output}\n\n{DISCLAIMER_PHRASE}"
-        return final_description
+        result["description"] = f"{result['description']}\n\n{DISCLAIMER_PHRASE}"
+        
+        return result
+    except requests.exceptions.RequestException as e:
+        print("OpenAI request failed:", e)
+        return {
+            "title": "Untitled Item",
+            "description": "Failed to generate description (network error).",
+            "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+        }
     except Exception as e:
         print("OpenAI request failed:", e)
-        return "Failed to generate description due to exception."
+        return {
+            "title": "Untitled Item",
+            "description": "Failed to generate description due to exception.",
+            "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+        }
 
+# Remove the individual functions since they're no longer needed
+def generate_description(cropped_image_keys, metadata) -> str:
+    """Deprecated: Use generate_item_details instead"""
+    raise DeprecationWarning("Use generate_item_details instead")
 
+def generate_title(cropped_image_keys, metadata) -> str:
+    """Deprecated: Use generate_item_details instead"""
+    raise DeprecationWarning("Use generate_item_details instead")
+
+def estimate_value(cropped_image_keys, metadata, description) -> dict:
+    """Deprecated: Use generate_item_details instead"""
+    raise DeprecationWarning("Use generate_item_details instead")
 
 
 # -----------------------------------------------------------------------
