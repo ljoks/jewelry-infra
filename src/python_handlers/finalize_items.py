@@ -13,11 +13,46 @@ secrets_client = boto3.client("secretsmanager")
 BUCKET_NAME = os.environ.get('BUCKET_NAME', '')
 ITEMS_TABLE_NAME = os.environ.get('ITEMS_TABLE', '')
 IMAGES_TABLE_NAME = os.environ.get('IMAGES_TABLE', '')
+COUNTER_TABLE_NAME = os.environ.get('COUNTER_TABLE', '')
 
 _cached_api_key = None # Global cache for the API key
 
 items_table = dynamo.Table(ITEMS_TABLE_NAME)
 images_table = dynamo.Table(IMAGES_TABLE_NAME)
+counter_table = dynamo.Table(COUNTER_TABLE_NAME)
+
+def generate_sequential_id() -> str:
+    """
+    Generate a sequential ID for an item using a global atomic counter
+    """
+    try:
+        # Update the counter atomically and get the new value
+        response = counter_table.update_item(
+            Key={
+                'counter_name': 'GLOBAL',
+                'counter_type': 'ITEM'
+            },
+            UpdateExpression='ADD #count :inc',
+            ExpressionAttributeNames={
+                '#count': 'count'
+            },
+            ExpressionAttributeValues={
+                ':inc': 1
+            },
+            ReturnValues='UPDATED_NEW'
+        )
+        
+        # Get the new count and return it as a string
+        return str(response['Attributes']['count'])
+    except Exception as e:
+        print(f"Error generating sequential ID: {str(e)}")
+        raise
+
+def generate_item_id(marker_id: str) -> str:
+    """
+    Generate a sequential ID for an item
+    """
+    return generate_sequential_id()
 
 def lambda_handler(event, context):
     """
@@ -418,9 +453,6 @@ def build_response(status_code: int, body):
         "headers": {"Content-Type": "application/json"},
         "body": json.dumps(body)
     }
-
-def generate_item_id(marker_id: str) -> str:
-    return f"item_{marker_id}_{int(time.time())}"
 
 def generate_image_id() -> str:
     return f"img_{int(time.time())}"

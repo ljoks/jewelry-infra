@@ -5,12 +5,41 @@ const dynamo = new DynamoDB.DocumentClient();
 const ITEMS_TABLE = process.env.ITEMS_TABLE!;
 const AUCTIONS_TABLE = process.env.AUCTIONS_TABLE!;
 const IMAGES_TABLE = process.env.IMAGES_TABLE!;
+const COUNTER_TABLE = process.env.COUNTER_TABLE!;
+
+async function generateSequentialId(): Promise<string> {
+  try {
+    // Update the counter atomically and get the new value
+    const response = await dynamo.update({
+      TableName: COUNTER_TABLE,
+      Key: {
+        counter_name: 'GLOBAL',
+        counter_type: 'ITEM'
+      },
+      UpdateExpression: 'ADD #count :inc',
+      ExpressionAttributeNames: {
+        '#count': 'count'
+      },
+      ExpressionAttributeValues: {
+        ':inc': 1
+      },
+      ReturnValues: 'UPDATED_NEW'
+    }).promise();
+    
+    console.log('Generate Sequential ID response', response);
+    
+    // Get the new count and return it as a string
+    return response.Attributes?.count.toString() || '1';
+  } catch (error) {
+    console.error('Error generating sequential ID:', error);
+    throw error;
+  }
+}
 
 export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, context: Context) {
   try {
     const { routeKey, pathParameters } = event;
     console.log(routeKey);
-
 
     if (routeKey === 'POST /items') {
       // Create a new item
@@ -18,12 +47,10 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
         return buildResponse(400, { error: 'Request body required' });
       }
       const body = JSON.parse(event.body);
-      const { item_id, auction_id, marker_id, item_title, description, created_by } = body;
+      const { auction_id, marker_id, item_title, description, created_by } = body;
 
-      // Validate required fields
-      if (!item_id) {
-        return buildResponse(400, { error: 'item_id is required' });
-      }
+      // Generate sequential ID for the item
+      const item_id = await generateSequentialId();
 
       const now = new Date().toISOString();
       await dynamo.put({
@@ -39,6 +66,8 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
           updated_at: now
         },
       }).promise();
+
+      console.log('Item created', item_id);
 
       return buildResponse(201, { message: 'Item created', item_id });
     }

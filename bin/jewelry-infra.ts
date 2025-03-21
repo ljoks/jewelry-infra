@@ -20,5 +20,5 @@ new AuctionApiStack(app, 'AuctionApiStack', {
   imagesBucket: backendStack.imagesBucket,
   userPool: authStack.userPool,
   userPoolClient: authStack.userPoolClient,
-  opencvPythonLayer: backendStack.opencvPythonLayer
+  counterTable: backendStack.counterTable
 });

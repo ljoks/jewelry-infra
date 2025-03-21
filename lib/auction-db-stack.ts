@@ -1,19 +1,19 @@
 import { Stack, StackProps, RemovalPolicy } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { Table, AttributeType, BillingMode } from 'aws-cdk-lib/aws-dynamodb';
-import { Bucket, BlockPublicAccess, BucketEncryption, HttpMethods } from 'aws-cdk-lib/aws-s3';
-import { PolicyStatement, Effect, StarPrincipal } from "aws-cdk-lib/aws-iam";
-
-
-import { LayerVersion, Code, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Bucket, BlockPublicAccess, BucketEncryption, HttpMethods, ObjectOwnership } from 'aws-cdk-lib/aws-s3';
+import { PolicyStatement, Effect, StarPrincipal, Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
+import { Function, Runtime, Code } from 'aws-cdk-lib/aws-lambda';
+import { LayerVersion } from 'aws-cdk-lib/aws-lambda';
 
 export class AuctionDBStack extends Stack {
   public readonly auctionsTable: Table;
   public readonly itemsTable: Table;
   public readonly imagesTable: Table;
   public readonly usersTable: Table;
+  public readonly counterTable: Table;
   public readonly imagesBucket: Bucket;
-  public readonly opencvPythonLayer: LayerVersion;
+  public readonly createItemFunction: Function;
 
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
@@ -68,14 +68,14 @@ export class AuctionDBStack extends Stack {
     this.imagesBucket = new Bucket(this, 'JewelryImagesBucket', {
       bucketName: 'my-jewelry-auctions-images-bucket', // Must be globally unique
       encryption: BucketEncryption.S3_MANAGED,
-      blockPublicAccess: {
+      blockPublicAccess: new BlockPublicAccess({
         blockPublicAcls: false,
         ignorePublicAcls: false,
         restrictPublicBuckets: false,
-        blockPublicPolicy: false,
-      },
+        blockPublicPolicy: false
+      }),
       removalPolicy: RemovalPolicy.DESTROY, // Dev only
-      // publicReadAccess: true, // Allow objects to be publicly read
+      objectOwnership: ObjectOwnership.BUCKET_OWNER_PREFERRED,
       cors: [
         {
           allowedOrigins: ['http://localhost:3000', '*'], // Allow frontend requests
@@ -87,13 +87,24 @@ export class AuctionDBStack extends Stack {
       ],
     });
 
+    // Add bucket policy for public read access
+    this.imagesBucket.addToResourcePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        principals: [new StarPrincipal()],
+        actions: ['s3:GetObject'],
+        resources: [this.imagesBucket.arnForObjects('*')],
+      })
+    );
 
-    // Python Handlers and Associated Layers
-    this.opencvPythonLayer = new LayerVersion(this, 'OpenCVPythonLayer', {
-      layerVersionName: 'OpenCVPythonLayer',
-      code: Code.fromAsset('layers/opencv-python/opencv-python-layer.zip'),
-      compatibleRuntimes: [Runtime.PYTHON_3_9], // or whichever you need
-      description: 'OpenCV (Python) for marker detection',
+    // Counter Table for Sequential IDs
+    this.counterTable = new Table(this, 'CounterTable', {
+      tableName: 'ItemCounters',
+      partitionKey: { name: 'counter_name', type: AttributeType.STRING },
+      sortKey: { name: 'counter_type', type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      removalPolicy: RemovalPolicy.DESTROY, // Dev only
     });
+
   }
 }

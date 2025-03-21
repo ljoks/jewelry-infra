@@ -21,7 +21,7 @@ interface AuctionApiStackProps extends StackProps {
   imagesBucket: Bucket;
   userPool: IUserPool; // from AuthStack
   userPoolClient: UserPoolClient;
-  opencvPythonLayer: LayerVersion;
+  counterTable: Table;
 }
 
 export class AuctionApiStack extends Stack {
@@ -57,11 +57,13 @@ export class AuctionApiStack extends Stack {
         ITEMS_TABLE: props.itemsTable.tableName,
         AUCTIONS_TABLE: props.auctionsTable.tableName,
         IMAGES_TABLE: props.imagesTable.tableName,
+        COUNTER_TABLE: props.counterTable.tableName
       },
     });
     props.itemsTable.grantReadWriteData(itemsLambda);
     props.auctionsTable.grantReadData(itemsLambda);
     props.imagesTable.grantReadData(itemsLambda);
+    props.counterTable.grantReadWriteData(itemsLambda);
 
     // Images Lambda
     const imagesLambda = new NodejsFunction(this, 'ImagesLambda', {
@@ -82,7 +84,7 @@ export class AuctionApiStack extends Stack {
       runtime: Runtime.PYTHON_3_9,
       code: Code.fromAsset('src/python_handlers'), // or from 'src/group_images' if you prefer
       handler: 'group_images.lambda_handler',
-      layers: [props.opencvPythonLayer],
+      layers: [LayerVersion.fromLayerVersionArn(this, 'GroupImagesLayer', 'arn:aws:lambda:us-east-1:424657137073:layer:opencv-python-headless:2')],
       environment: {
         BUCKET_NAME: props.imagesBucket.bucketName
       },
@@ -99,18 +101,20 @@ export class AuctionApiStack extends Stack {
       runtime: Runtime.PYTHON_3_9,
       code: Code.fromAsset('src/python_handlers'),
       handler: 'finalize_items.lambda_handler',
-      layers: [props.opencvPythonLayer],
+      layers: [LayerVersion.fromLayerVersionArn(this, 'FinalizeItemsLayer', 'arn:aws:lambda:us-east-1:424657137073:layer:opencv-python-headless:2')],
       environment: {
         BUCKET_NAME: props.imagesBucket.bucketName,
         ITEMS_TABLE: props.itemsTable.tableName,
         IMAGES_TABLE: props.imagesTable.tableName,
-        OPENAI_SECRET_ARN: openAiSecret.secretArn
+        COUNTER_TABLE: props.counterTable.tableName,
+        OPENAI_SECRET_ARN: openAiSecret.secretArn,
       },
       timeout: Duration.seconds(30)
     });
     props.imagesBucket.grantReadWrite(finalizeItemsLambda);
     props.itemsTable.grantReadWriteData(finalizeItemsLambda);
     props.imagesTable.grantReadWriteData(finalizeItemsLambda);
+    props.counterTable.grantReadWriteData(finalizeItemsLambda);
     openAiSecret.grantRead(finalizeItemsLambda);
 
     // Export Catalog Lambda
