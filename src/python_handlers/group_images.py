@@ -1,9 +1,6 @@
 import json
 import os
 import boto3
-import cv2 as cv
-import numpy as np
-import base64
 from typing import Dict, Any, List
 
 s3 = boto3.client('s3')
@@ -14,23 +11,35 @@ def lambda_handler(event, context):
     POST /groupImages
     Expects a JSON body like:
     {
-        "images": [
-          { "s3Key": "uploads/tmp123.jpg" },
-          { "s3Key": "uploads/tmp124.jpg" }
+        "num_items": 3,           # Number of items being photographed
+        "views_per_item": 2,      # Number of views per item (e.g. top view, side view)
+        "images": [               # Images in sequence order
+          { "s3Key": "uploads/item1_top.jpg" },    # First item, top view
+          { "s3Key": "uploads/item2_top.jpg" },    # Second item, top view
+          { "s3Key": "uploads/item3_top.jpg" },    # Third item, top view
+          { "s3Key": "uploads/item1_side.jpg" },   # First item, side view
+          { "s3Key": "uploads/item2_side.jpg" },   # Second item, side view
+          { "s3Key": "uploads/item3_side.jpg" }    # Third item, side view
         ]
     }
     Returns something like:
     [
       {
-        "marker_id": "group1",
+        "item_index": 0,
         "images": [
-          { "index": 0, "imageKey": "uploads/tmp123.jpg" },
-          { "index": 1, "imageKey": "uploads/tmp124.jpg" }
+          { "index": 0, "imageKey": "uploads/item1_top.jpg" },
+          { "index": 3, "imageKey": "uploads/item1_side.jpg" }
+        ]
+      },
+      {
+        "item_index": 1,
+        "images": [
+          { "index": 1, "imageKey": "uploads/item2_top.jpg" },
+          { "index": 4, "imageKey": "uploads/item2_side.jpg" }
         ]
       },
       ...
     ]
-    (No additional marker-based metadata is parsed here.)
     """
     try:
         if event["requestContext"]["http"]["method"] != "POST":
@@ -38,37 +47,51 @@ def lambda_handler(event, context):
 
         body = json.loads(event.get("body", "{}"))
         images = body.get("images", [])
+        num_items = body.get("num_items")
+        views_per_item = body.get("views_per_item")
+
         if not images:
             return build_response(400, {"error": "No images provided."})
+        if not num_items:
+            return build_response(400, {"error": "num_items is required."})
+        if not views_per_item:
+            return build_response(400, {"error": "views_per_item is required."})
 
-        # We'll store: marker_id -> list of (index, imageKey)
+        # Validate that we have the expected number of images
+        expected_images = num_items * views_per_item
+        if len(images) != expected_images:
+            return build_response(400, {
+                "error": f"Expected {expected_images} images ({num_items} items × {views_per_item} views), but got {len(images)}."
+            })
+
+        # Group images by item index
         groups = {}
-
-        # For each image, we detect the item marker (NOT other markers).
-        for idx, img_info in enumerate(images):
-            s3_key = img_info.get("s3Key")
-            if not s3_key:
-                continue
-
-            # 1) Download the image from S3
-            original_img = download_s3_image(BUCKET_NAME, s3_key)
-            if original_img is None:
-                continue
-
-            # 2) Detect marker (item marker)
-            marker_id = detect_item_marker(original_img)
-
-            # 3) Group by marker_id
-            if marker_id not in groups:
-                groups[marker_id] = []
-            groups[marker_id].append({"index": idx, "imageKey": s3_key})
+        for view_num in range(views_per_item):
+            # For each view type (e.g. top view, then side view)
+            view_offset = view_num * num_items
+            
+            for item_num in range(num_items):
+                # Get the image for this item at this view
+                img_idx = view_offset + item_num
+                img_info = images[img_idx]
+                
+                if not img_info.get("s3Key"):
+                    continue
+                
+                # Add to the appropriate group
+                if item_num not in groups:
+                    groups[item_num] = []
+                groups[item_num].append({
+                    "index": img_idx,
+                    "imageKey": img_info["s3Key"]
+                })
 
         # Convert to the JSON-friendly structure
         result = []
-        for marker, img_list in groups.items():
+        for item_num, img_list in groups.items():
             result.append({
-                "marker_id": marker,
-                "images": img_list
+                "item_index": item_num,
+                "images": sorted(img_list, key=lambda x: x["index"])
             })
 
         return build_response(200, result)
@@ -76,42 +99,6 @@ def lambda_handler(event, context):
     except Exception as e:
         print(e)
         return build_response(500, {"error": "Internal server error", "detail": str(e)})
-
-
-def download_s3_image(bucket: str, key: str) -> np.ndarray:
-    """
-    Downloads an image from S3 and converts it to an OpenCV numpy array.
-    Returns None on error.
-    """
-    try:
-        response = s3.get_object(Bucket=bucket, Key=key)
-        data = response['Body'].read()
-        np_arr = np.frombuffer(data, np.uint8)
-        image = cv.imdecode(np_arr, cv.IMREAD_COLOR)
-        return image
-    except Exception as e:
-        print(f"Error downloading {key} from S3: {e}")
-        return None
-
-def detect_item_marker(image: np.ndarray) -> str:
-    """
-    Detects the 'item marker' in the image using OpenCV.
-    Return a marker_id string, or 'unknown' if none found.
-    Dummy placeholder for now, uses ArUco or other logic.
-    """
-    # Example ArUco detection
-    dictionary = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_250)
-    parameters = cv.aruco.DetectorParameters()
-    detector = cv.aruco.ArucoDetector(dictionary, parameters)
-
-    gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
-    markerCorners, markerIds, _ = detector.detectMarkers(gray)
-
-    if markerIds is not None and len(markerIds) > 0:
-        # Just use the first marker ID
-        return f"marker_{markerIds[0][0]}"
-    else:
-        return "unknown"
 
 def build_response(status_code: int, body: Any):
     return {

@@ -77,31 +77,17 @@ export class AuctionApiStack extends Stack {
       },
     });
     props.imagesTable.grantReadWriteData(imagesLambda);
-    props.itemsTable.grantReadData(imagesLambda); // if referencing items
+    props.itemsTable.grantReadData(imagesLambda);
     props.imagesBucket.grantReadWrite(imagesLambda);
 
-    const groupImagesLambda = new LambdaFunction(this, 'GroupImagesLambda', {
-      runtime: Runtime.PYTHON_3_9,
-      code: Code.fromAsset('src/python_handlers'), // or from 'src/group_images' if you prefer
-      handler: 'group_images.lambda_handler',
-      layers: [LayerVersion.fromLayerVersionArn(this, 'GroupImagesLayer', 'arn:aws:lambda:us-east-1:424657137073:layer:opencv-python-headless:2')],
-      environment: {
-        BUCKET_NAME: props.imagesBucket.bucketName
-      },
-      timeout: Duration.seconds(30)
-    });
-    props.imagesBucket.grantReadWrite(groupImagesLambda);
-
-    // Import or look up your existing secret. 
+    // Import or look up your existing secret
     const openAiSecret = Secret.fromSecretNameV2(this, 'OPENAI_API_KEY', 'OPENAI_API_KEY');
 
-
-    // 2) finalize_items.py Lambda
-    const finalizeItemsLambda = new LambdaFunction(this, 'FinalizeItemsLambda', {
-      runtime: Runtime.PYTHON_3_9,
-      code: Code.fromAsset('src/python_handlers'),
-      handler: 'finalize_items.lambda_handler',
-      layers: [LayerVersion.fromLayerVersionArn(this, 'FinalizeItemsLayer', 'arn:aws:lambda:us-east-1:424657137073:layer:opencv-python-headless:2')],
+    // Combined process items lambda (replaces both group_images and finalize_items)
+    const processItemsLambda = new NodejsFunction(this, 'ProcessItemsLambda', {
+      entry: path.join(__dirname, '..', 'src', 'handlers', 'process-items.ts'),
+      handler: 'handler',
+      runtime: Runtime.NODEJS_LATEST,
       environment: {
         BUCKET_NAME: props.imagesBucket.bucketName,
         ITEMS_TABLE: props.itemsTable.tableName,
@@ -111,11 +97,11 @@ export class AuctionApiStack extends Stack {
       },
       timeout: Duration.seconds(30)
     });
-    props.imagesBucket.grantReadWrite(finalizeItemsLambda);
-    props.itemsTable.grantReadWriteData(finalizeItemsLambda);
-    props.imagesTable.grantReadWriteData(finalizeItemsLambda);
-    props.counterTable.grantReadWriteData(finalizeItemsLambda);
-    openAiSecret.grantRead(finalizeItemsLambda);
+    props.imagesBucket.grantReadWrite(processItemsLambda);
+    props.itemsTable.grantReadWriteData(processItemsLambda);
+    props.imagesTable.grantReadWriteData(processItemsLambda);
+    props.counterTable.grantReadWriteData(processItemsLambda);
+    openAiSecret.grantRead(processItemsLambda);
 
     // Export Catalog Lambda
     const exportCatalogLambda = new LambdaFunction(this, 'ExportCatalogLambda', {
@@ -163,8 +149,7 @@ export class AuctionApiStack extends Stack {
     const auctionsIntegration = new HttpLambdaIntegration("AuctionsIntegration", auctionsLambda);
     const itemsIntegration = new HttpLambdaIntegration("ItemsIntegration", itemsLambda);
     const imagesIntegration = new HttpLambdaIntegration("ImagesIntegration", imagesLambda);
-    const groupImagesIntegration = new HttpLambdaIntegration("GroupImagesIntegration", groupImagesLambda);
-    const FinalizeItemsIntegration = new HttpLambdaIntegration("FinalizeItemsIntegration", finalizeItemsLambda);
+    const processItemsIntegration = new HttpLambdaIntegration("ProcessItemsIntegration", processItemsLambda);
     const ExportCatalogIntegration = new HttpLambdaIntegration("ExportCatalogIntegration", exportCatalogLambda);
 
     // 5. Define Routes + Require Cognito Auth
@@ -224,16 +209,9 @@ export class AuctionApiStack extends Stack {
     })
 
     this.httpApi.addRoutes({
-      path: '/groupImages',
+      path: '/processItems',
       methods: [HttpMethod.POST],
-      integration: groupImagesIntegration,
-      authorizer,
-    });
-
-    this.httpApi.addRoutes({
-      path: '/finalizeItems',
-      methods: [HttpMethod.POST],
-      integration: FinalizeItemsIntegration,
+      integration: processItemsIntegration,
       authorizer,
     });
 
