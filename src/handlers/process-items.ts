@@ -32,6 +32,25 @@ interface ProcessItemsRequest {
   metadata?: Record<string, any>;
 }
 
+interface CreateItemsRequest {
+  items: StagedItem[];
+  auction_id?: string;
+  created_by: string;
+}
+
+interface StagedItem {
+  item_index: number;
+  images: string[];
+  title: string;
+  description: string;
+  value_estimate: {
+    min_value: number;
+    max_value: number;
+    currency: string;
+  };
+  metadata: Record<string, any>;
+}
+
 interface OpenAIResponse {
   title: string;
   description: string;
@@ -147,7 +166,7 @@ Respond in this exact JSON format:
         "weight_grams": <number or null if not visible>,
         "markings": ["<marking1>", "<marking2>", ...] or [] if none visible
     }
-}${metadata ? `\n\nExisting Metadata:\n${JSON.stringify(metadata, null, 2)}` : ''}`;
+}`;
 
   try {
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -252,119 +271,18 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       };
     }
 
-    const body: ProcessItemsRequest = JSON.parse(event.body || '{}');
-    const { num_items, views_per_item, images, auction_id, created_by, metadata = {} } = body;
-
-    if (!images?.length) {
+    // Check which operation we're performing based on the path
+    const path = event.requestContext.http.path;
+    if (path.endsWith('/stage')) {
+      return handleStageItems(event);
+    } else if (path.endsWith('/create')) {
+      return handleCreateItems(event);
+    } else {
       return {
-        statusCode: 400,
-        body: JSON.stringify({ error: 'No images provided.' })
+        statusCode: 404,
+        body: JSON.stringify({ error: 'Unknown operation' })
       };
     }
-
-    if (!num_items) {
-      return {
-        statusCode: 400,
-        body: JSON.stringify({ error: 'num_items is required.' })
-      };
-    }
-
-    if (!views_per_item) {
-      return {
-        statusCode: 400,
-        body: JSON.stringify({ error: 'views_per_item is required.' })
-      };
-    }
-
-    if (!created_by) {
-      return {
-        statusCode: 400,
-        body: JSON.stringify({ error: 'created_by is required.' })
-      };
-    }
-
-    // Validate image count
-    const expectedImages = num_items * views_per_item;
-    if (images.length !== expectedImages) {
-      return {
-        statusCode: 400,
-        body: JSON.stringify({
-          error: `Expected ${expectedImages} images (${num_items} items × ${views_per_item} views), but got ${images.length}.`
-        })
-      };
-    }
-
-    // Group images by sequence
-    const groups = groupImages(images, num_items, views_per_item);
-    const createdItems = [];
-    const now = Math.floor(Date.now() / 1000);
-
-    // Process each group
-    for (const group of groups) {
-      const imageKeys = group.images.map(img => img.s3Key);
-      const itemId = await generateItemId();
-      
-      // Generate item details using OpenAI
-      const itemDetails = await generateItemDetails(imageKeys, metadata);
-
-      // Merge discovered metadata
-      const finalMetadata = {
-        ...metadata,
-        ...(itemDetails.discovered_metadata || {})
-      };
-
-      // Create item record
-      const itemData: ItemData = {
-        item_id: itemId,
-        item_index: group.item_index,
-        metadata: finalMetadata,
-        images: imageKeys,
-        title: itemDetails.title,
-        description: itemDetails.description,
-        value_estimate: itemDetails.value_estimate,
-        created_at: now,
-        updated_at: now,
-        created_by
-      };
-
-      if (auction_id) {
-        itemData.auction_id = auction_id;
-      }
-
-      await dynamodb.put({
-        TableName: ITEMS_TABLE,
-        Item: itemData
-      }).promise();
-
-      // Create image records
-      for (const key of imageKeys) {
-        const imageData: ImageData = {
-          image_id: `img_${now}_${Math.random().toString(36).substr(2, 9)}`,
-          item_id: itemId,
-          s3_key_original: key,
-          created_at: now
-        };
-
-        if (auction_id) {
-          imageData.auction_id = auction_id;
-        }
-
-        await dynamodb.put({
-          TableName: IMAGES_TABLE,
-          Item: imageData
-        }).promise();
-      }
-
-      createdItems.push(itemData);
-    }
-
-    return {
-      statusCode: 201,
-      body: JSON.stringify({
-        message: 'Items processed successfully',
-        items: createdItems
-      })
-    };
 
   } catch (error: unknown) {
     console.error(error);
@@ -376,4 +294,155 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       })
     };
   }
+}
+
+async function handleStageItems(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  const body: ProcessItemsRequest = JSON.parse(event.body || '{}');
+  const { num_items, views_per_item, images, metadata = {} } = body;
+
+  if (!images?.length) {
+    return {
+      statusCode: 400,
+      body: JSON.stringify({ error: 'No images provided.' })
+    };
+  }
+
+  if (!num_items) {
+    return {
+      statusCode: 400,
+      body: JSON.stringify({ error: 'num_items is required.' })
+    };
+  }
+
+  if (!views_per_item) {
+    return {
+      statusCode: 400,
+      body: JSON.stringify({ error: 'views_per_item is required.' })
+    };
+  }
+
+  // Validate image count
+  const expectedImages = num_items * views_per_item;
+  if (images.length !== expectedImages) {
+    return {
+      statusCode: 400,
+      body: JSON.stringify({
+        error: `Expected ${expectedImages} images (${num_items} items × ${views_per_item} views), but got ${images.length}.`
+      })
+    };
+  }
+
+  // Group images by sequence
+  const groups = groupImages(images, num_items, views_per_item);
+  const stagedItems: StagedItem[] = [];
+
+  // Process each group
+  for (const group of groups) {
+    const imageKeys = group.images.map(img => img.s3Key);
+    
+    // Generate item details using OpenAI
+    const itemDetails = await generateItemDetails(imageKeys, metadata);
+
+    // Create staged item
+    const stagedItem: StagedItem = {
+      item_index: group.item_index,
+      images: imageKeys,
+      title: itemDetails.title,
+      description: itemDetails.description,
+      value_estimate: itemDetails.value_estimate,
+      metadata: {
+        ...metadata,
+        ...(itemDetails.discovered_metadata || {})
+      }
+    };
+
+    stagedItems.push(stagedItem);
+  }
+
+  return {
+    statusCode: 200,
+    body: JSON.stringify({
+      message: 'Items staged successfully',
+      items: stagedItems
+    })
+  };
+}
+
+async function handleCreateItems(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  const body: CreateItemsRequest = JSON.parse(event.body || '{}');
+  const { items, auction_id, created_by } = body;
+
+  if (!items?.length) {
+    return {
+      statusCode: 400,
+      body: JSON.stringify({ error: 'No items provided.' })
+    };
+  }
+
+  if (!created_by) {
+    return {
+      statusCode: 400,
+      body: JSON.stringify({ error: 'created_by is required.' })
+    };
+  }
+
+  const createdItems = [];
+  const now = Math.floor(Date.now() / 1000);
+
+  // Create each item
+  for (const item of items) {
+    const itemId = await generateItemId();
+    
+    // Create item record
+    const itemData: ItemData = {
+      item_id: itemId,
+      item_index: item.item_index,
+      metadata: item.metadata,
+      images: item.images,
+      title: item.title,
+      description: item.description,
+      value_estimate: item.value_estimate,
+      created_at: now,
+      updated_at: now,
+      created_by
+    };
+
+    if (auction_id) {
+      itemData.auction_id = auction_id;
+    }
+
+    await dynamodb.put({
+      TableName: ITEMS_TABLE,
+      Item: itemData
+    }).promise();
+
+    // Create image records
+    for (const key of item.images) {
+      const imageData: ImageData = {
+        image_id: `img_${now}_${Math.random().toString(36).substr(2, 9)}`,
+        item_id: itemId,
+        s3_key_original: key,
+        created_at: now
+      };
+
+      if (auction_id) {
+        imageData.auction_id = auction_id;
+      }
+
+      await dynamodb.put({
+        TableName: IMAGES_TABLE,
+        Item: imageData
+      }).promise();
+    }
+
+    createdItems.push(itemData);
+  }
+
+  return {
+    statusCode: 201,
+    body: JSON.stringify({
+      message: 'Items created successfully',
+      items: createdItems
+    })
+  };
 } 

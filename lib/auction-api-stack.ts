@@ -215,6 +215,21 @@ export class AuctionApiStack extends Stack {
       authorizer,
     });
 
+    // Process items routes
+    this.httpApi.addRoutes({
+      path: '/processItems/stage',
+      methods: [HttpMethod.POST],
+      integration: processItemsIntegration,
+      authorizer,
+    });
+
+    this.httpApi.addRoutes({
+      path: '/processItems/create',
+      methods: [HttpMethod.POST],
+      integration: processItemsIntegration,
+      authorizer,
+    });
+
     // Export catalog route
     this.httpApi.addRoutes({
       path: '/export/catalog',
