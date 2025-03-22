@@ -179,7 +179,17 @@ Respond in this exact JSON format:
       throw new Error('No content in OpenAI response');
     }
 
-    const result = JSON.parse(content.trim());
+    // Clean the content by removing markdown code blocks if present
+    let cleanContent = content.trim();
+    if (cleanContent.startsWith('```json')) {
+      cleanContent = cleanContent.slice(7); // Remove ```json
+    }
+    if (cleanContent.endsWith('```')) {
+      cleanContent = cleanContent.slice(0, -3); // Remove ```
+    }
+    cleanContent = cleanContent.trim();
+
+    const result = JSON.parse(cleanContent);
 
     // Add disclaimer
     const DISCLAIMER_PHRASE = 
