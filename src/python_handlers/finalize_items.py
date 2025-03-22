@@ -21,7 +21,7 @@ items_table = dynamo.Table(ITEMS_TABLE_NAME)
 images_table = dynamo.Table(IMAGES_TABLE_NAME)
 counter_table = dynamo.Table(COUNTER_TABLE_NAME)
 
-def generate_sequential_id() -> str:
+def generate_item_id() -> str:
     """
     Generate a sequential ID for an item using a global atomic counter
     """
@@ -48,12 +48,6 @@ def generate_sequential_id() -> str:
         print(f"Error generating sequential ID: {str(e)}")
         raise
 
-def generate_item_id(marker_id: str) -> str:
-    """
-    Generate a sequential ID for an item
-    """
-    return generate_sequential_id()
-
 def lambda_handler(event, context):
     """
     POST /finalizeItems
@@ -61,6 +55,11 @@ def lambda_handler(event, context):
     Expects JSON body like:
     {
       "auction_id": "auctionABC",
+      "created_by": "user123",  // ID of the user creating these items
+      "metadata": {             // Optional metadata that applies to ALL items
+        "collection": "summer2024",
+        "source": "estate_sale"
+      },
       "groups": [
         {
           "marker_id": "marker_42",
@@ -91,10 +90,15 @@ def lambda_handler(event, context):
 
         body = json.loads(event.get("body", "{}"))
         auction_id = body.get("auction_id")
+        created_by = body.get("created_by")  # Get the user ID who is creating the items
+        metadata = body.get("metadata", {})  # Get metadata that applies to all items
         groups = body.get("groups", [])
 
         if not groups:
             return build_response(400, {"error": "groups[] is required."})
+            
+        if not created_by:
+            return build_response(400, {"error": "created_by is required."})
 
         created_items = []
 
@@ -103,9 +107,11 @@ def lambda_handler(event, context):
             marker_id = group.get("marker_id", "unknown")
             images = group.get("images", [])
 
-            item_id = generate_item_id(marker_id)
+            # Sort images by index to preserve the original order
+            images.sort(key=lambda x: x.get("index", float('inf')))
+
+            item_id = generate_item_id()
             now_ts = int(time.time())
-            metadata = {}
 
             # We'll store final cropped S3 paths here
             cropped_image_keys = []
@@ -148,6 +154,10 @@ def lambda_handler(event, context):
             # Generate all item details in a single API call
             item_details = generate_item_details(cropped_image_keys, metadata)
 
+            # Merge discovered metadata with existing metadata
+            if item_details.get("discovered_metadata"):
+                metadata.update(item_details["discovered_metadata"])
+
             # 7) Insert the final item in DynamoDB
             item_data = {
                 "item_id": item_id,
@@ -158,7 +168,8 @@ def lambda_handler(event, context):
                 "description": item_details["description"],
                 "value_estimate": item_details["value_estimate"],
                 "created_at": now_ts,
-                "updated_at": now_ts
+                "updated_at": now_ts,
+                "created_by": created_by
             }
             
             # Only include auction_id if it was provided and not empty/None
@@ -282,7 +293,8 @@ def generate_item_details(cropped_image_keys, metadata) -> dict:
         return {
             "title": "Untitled Item",
             "description": "No description (missing OpenAI key)",
-            "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+            "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"},
+            "discovered_metadata": {}
         }
 
     # Construct image URLs from S3 keys
@@ -291,12 +303,15 @@ def generate_item_details(cropped_image_keys, metadata) -> dict:
         for k in cropped_image_keys
     ]
 
-    # Construct prompt text that asks for all three components
+    # Construct prompt text that asks for all components
     prompt_text = """You are an expert jewelry appraiser and marketer. Based on these images, provide the following details in JSON format:
 
 1. A concise title (maximum 60 characters) highlighting key features
 2. A marketing-friendly description of the piece in plaintext
 3. A value estimate considering materials, craftsmanship, condition, design complexity, and market trends
+4. Discovered metadata including:
+   - Weight in grams if a scale is visible in any image
+   - Any markings or stamps visible on the jewelry (e.g. 14K, 925, maker's marks)
 
 Respond in this exact JSON format:
 {
@@ -305,13 +320,17 @@ Respond in this exact JSON format:
     "value_estimate": {
         "min_value": <number>,
         "max_value": <number>,
-        "currency": "USD",
+        "currency": "USD"
+    },
+    "discovered_metadata": {
+        "weight_grams": <number or null if not visible>,
+        "markings": ["<marking1>", "<marking2>", ...] or [] if none visible
     }
 }"""
 
     # Append metadata if available
     if metadata:
-        prompt_text += f"\n\nMetadata:\n{metadata}"
+        prompt_text += f"\n\nExisting Metadata:\n{metadata}"
 
     # Create the messages payload
     messages = [
@@ -340,7 +359,8 @@ Respond in this exact JSON format:
             return {
                 "title": "Untitled Item",
                 "description": "Failed to generate description (OpenAI error).",
-                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"},
+                "discovered_metadata": {}
             }
         print(resp.json())
         
@@ -350,7 +370,8 @@ Respond in this exact JSON format:
             return {
                 "title": "Untitled Item",
                 "description": "Failed to generate description (no response).",
-                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"},
+                "discovered_metadata": {}
             }
 
         content = data["choices"][0]["message"]["content"]
@@ -359,7 +380,8 @@ Respond in this exact JSON format:
             return {
                 "title": "Untitled Item",
                 "description": "Failed to generate description (empty response).",
-                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"},
+                "discovered_metadata": {}
             }
 
         # Clean the content by removing markdown code blocks if present
@@ -378,16 +400,18 @@ Respond in this exact JSON format:
             return {
                 "title": "Untitled Item",
                 "description": "Failed to generate description (invalid response format).",
-                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"},
+                "discovered_metadata": {}
             }
         
         # Validate required fields
-        if not all(key in result for key in ["title", "description", "value_estimate"]):
+        if not all(key in result for key in ["title", "description", "value_estimate", "discovered_metadata"]):
             print("OpenAI Error: Missing required fields in response")
             return {
                 "title": "Untitled Item",
                 "description": "Failed to generate description (incomplete response).",
-                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+                "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"},
+                "discovered_metadata": {}
             }
         
         # Add disclaimer to description
@@ -405,14 +429,16 @@ Respond in this exact JSON format:
         return {
             "title": "Untitled Item",
             "description": "Failed to generate description (network error).",
-            "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+            "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"},
+            "discovered_metadata": {}
         }
     except Exception as e:
         print("OpenAI request failed:", e)
         return {
             "title": "Untitled Item",
             "description": "Failed to generate description due to exception.",
-            "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"}
+            "value_estimate": {"min_value": 0, "max_value": 0, "currency": "USD"},
+            "discovered_metadata": {}
         }
 
 # Remove the individual functions since they're no longer needed
