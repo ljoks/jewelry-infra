@@ -28,8 +28,8 @@ export class AuctionDBStack extends Stack {
 
     // 2. Items Table
     this.itemsTable = new Table(this, 'ItemsTable', {
-      tableName: 'JewelryItems',
-      partitionKey: { name: 'item_id', type: AttributeType.STRING },
+      tableName: 'Items',
+      partitionKey: { name: 'item_id', type: AttributeType.NUMBER },
       billingMode: BillingMode.PAY_PER_REQUEST,
       removalPolicy: RemovalPolicy.DESTROY, // Dev only
     });
@@ -49,7 +49,7 @@ export class AuctionDBStack extends Stack {
     // GSI: Query images by item_id
     this.imagesTable.addGlobalSecondaryIndex({
       indexName: 'itemIdIndex',
-      partitionKey: { name: 'item_id', type: AttributeType.STRING },
+      partitionKey: { name: 'item_id', type: AttributeType.NUMBER },
     });
     this.imagesTable.addGlobalSecondaryIndex({
       indexName: 'auctionIdIndex',
@@ -63,6 +63,11 @@ export class AuctionDBStack extends Stack {
       partitionKey: { name: 'user_id', type: AttributeType.STRING },
       billingMode: BillingMode.PAY_PER_REQUEST,
       removalPolicy: RemovalPolicy.DESTROY, // Dev only
+    });
+    // GSI: Query users by email
+    this.usersTable.addGlobalSecondaryIndex({
+      indexName: 'EmailIndex',
+      partitionKey: { name: 'email', type: AttributeType.STRING },
     });
 
     this.imagesBucket = new Bucket(this, 'JewelryImagesBucket', {

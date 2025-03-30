@@ -7,7 +7,7 @@ const AUCTIONS_TABLE = process.env.AUCTIONS_TABLE!;
 const IMAGES_TABLE = process.env.IMAGES_TABLE!;
 const COUNTER_TABLE = process.env.COUNTER_TABLE!;
 
-async function generateSequentialId(): Promise<string> {
+async function generateSequentialId(): Promise<number> {
   try {
     // Update the counter atomically and get the new value
     const response = await dynamo.update({
@@ -28,8 +28,8 @@ async function generateSequentialId(): Promise<string> {
     
     console.log('Generate Sequential ID response', response);
     
-    // Get the new count and return it as a string
-    return response.Attributes?.count.toString() || '1';
+    // Get the new count and return it as a number
+    return response.Attributes?.count || 1;
   } catch (error) {
     console.error('Error generating sequential ID:', error);
     throw error;
@@ -79,7 +79,7 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
       }
       const resp = await dynamo.get({
         TableName: ITEMS_TABLE,
-        Key: { item_id: pathParameters.itemId }
+        Key: { item_id: parseInt(pathParameters.itemId, 10) }
       }).promise();
       return buildResponse(200, resp.Item);
     }
@@ -106,6 +106,11 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
         attrNames['#desc'] = 'description';
         attrValues[':desc'] = updateBody.description;
       }
+      if (updateBody.images !== undefined) {
+        updateExp.push('#images = :images');
+        attrNames['#images'] = 'images';
+        attrValues[':images'] = updateBody.images;
+      }
 
       if (updateExp.length === 0) {
         return buildResponse(400, { error: 'No updatable fields provided' });
@@ -114,7 +119,7 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
 
       await dynamo.update({
         TableName: ITEMS_TABLE,
-        Key: { item_id: pathParameters.itemId },
+        Key: { item_id: parseInt(pathParameters.itemId, 10) },
         UpdateExpression: 'SET ' + updateExp.join(', '),
         ExpressionAttributeNames: attrNames,
         ExpressionAttributeValues: attrValues,
@@ -130,7 +135,7 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
       }
       await dynamo.delete({
         TableName: ITEMS_TABLE,
-        Key: { item_id: pathParameters.itemId }
+        Key: { item_id: parseInt(pathParameters.itemId, 10) }
       }).promise();
       return buildResponse(200, { message: 'Item deleted' });
     }

@@ -66,7 +66,7 @@ interface OpenAIResponse {
 }
 
 interface ItemData {
-  item_id: string;
+  item_id: number;
   item_index: number;
   metadata: Record<string, any>;
   images: string[];
@@ -85,13 +85,13 @@ interface ItemData {
 
 interface ImageData {
   image_id: string;
-  item_id: string;
+  item_id: number;
   s3_key_original: string;
   created_at: number;
   auction_id?: string;
 }
 
-async function generateItemId(): Promise<string> {
+async function generateItemId(): Promise<number> {
   const response = await dynamodb.update({
     TableName: COUNTER_TABLE,
     Key: {
@@ -108,7 +108,7 @@ async function generateItemId(): Promise<string> {
     ReturnValues: 'UPDATED_NEW'
   }).promise();
 
-  return response.Attributes?.count.toString() || '';
+  return response.Attributes?.count || 1;
 }
 
 async function getOpenAIKey(): Promise<string> {
@@ -140,7 +140,8 @@ async function generateItemDetails(imageKeys: string[], metadata: Record<string,
   const imageUrls = imageKeys.map(key => ({
     type: "image_url" as const,
     image_url: {
-      url: `https://${BUCKET_NAME}.s3.amazonaws.com/${key}`
+      url: `https://${BUCKET_NAME}.s3.amazonaws.com/${key}`,
+      detail: "low"
     }
   }));
 
@@ -219,6 +220,8 @@ Respond in this exact JSON format:
 
     result.description = `${result.description}\n\n${DISCLAIMER_PHRASE}`;
 
+    console.log(result);
+
     return result;
   } catch (error) {
     console.error('OpenAI API error:', error);
@@ -232,34 +235,21 @@ Respond in this exact JSON format:
 }
 
 function groupImages(images: ImageInfo[], numItems: number, viewsPerItem: number): ItemGroup[] {
-  const groups: Record<number, ItemGroup> = {};
+  const groups: ItemGroup[] = [];
 
-  // Initialize groups
+  // Group images by item
   for (let itemNum = 0; itemNum < numItems; itemNum++) {
-    groups[itemNum] = {
-      item_index: itemNum,
-      images: []
-    };
-  }
-
-  // Group images by sequence
-  for (let viewNum = 0; viewNum < viewsPerItem; viewNum++) {
-    const viewOffset = viewNum * numItems;
+    const startIdx = itemNum * viewsPerItem;
+    const endIdx = startIdx + viewsPerItem;
+    const itemImages = images.slice(startIdx, endIdx);
     
-    for (let itemNum = 0; itemNum < numItems; itemNum++) {
-      const imgIdx = viewOffset + itemNum;
-      const imgInfo = images[imgIdx];
-      
-      if (imgInfo?.s3Key) {
-        groups[itemNum].images.push({
-          index: imgIdx,
-          s3Key: imgInfo.s3Key
-        });
-      }
-    }
+    groups.push({
+      item_index: itemNum,
+      images: itemImages
+    });
   }
 
-  return Object.values(groups);
+  return groups;
 }
 
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
@@ -340,6 +330,7 @@ async function handleStageItems(event: APIGatewayProxyEventV2): Promise<APIGatew
   for (const group of groups) {
     const imageKeys = group.images.map(img => img.s3Key);
     
+    console.log("generating item details for item index: ", group.item_index, "with image keys: ", imageKeys);
     // Generate item details using OpenAI
     const itemDetails = await generateItemDetails(imageKeys, metadata);
 

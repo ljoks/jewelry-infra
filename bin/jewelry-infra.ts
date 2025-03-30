@@ -10,7 +10,9 @@ const app = new cdk.App();
 const backendStack = new AuctionDBStack(app, 'AuctionDBStack');
 
 // 2. Deploy Cognito
-const authStack = new AuthStack(app, 'AuthStack');
+const authStack = new AuthStack(app, 'AuthStack', {
+  usersTable: backendStack.usersTable
+});
 
 // 3. Deploy API (Lambdas + API Gateway) with references
 new AuctionApiStack(app, 'AuctionApiStack', {
@@ -20,5 +22,6 @@ new AuctionApiStack(app, 'AuctionApiStack', {
   imagesBucket: backendStack.imagesBucket,
   userPool: authStack.userPool,
   userPoolClient: authStack.userPoolClient,
-  counterTable: backendStack.counterTable
+  counterTable: backendStack.counterTable,
+  usersTable: backendStack.usersTable
 });

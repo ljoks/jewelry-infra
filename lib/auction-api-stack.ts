@@ -3,6 +3,7 @@ import { Construct } from 'constructs';
 import { HttpApi, HttpMethod, CorsHttpMethod } from '@aws-cdk/aws-apigatewayv2-alpha';
 import { HttpLambdaIntegration } from '@aws-cdk/aws-apigatewayv2-integrations-alpha';
 import { HttpUserPoolAuthorizer, HttpUserPoolAuthorizerProps } from '@aws-cdk/aws-apigatewayv2-authorizers-alpha';
+import { HttpLambdaAuthorizer } from '@aws-cdk/aws-apigatewayv2-authorizers-alpha';
 
 import { Table } from 'aws-cdk-lib/aws-dynamodb';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
@@ -22,6 +23,7 @@ interface AuctionApiStackProps extends StackProps {
   userPool: IUserPool; // from AuthStack
   userPoolClient: UserPoolClient;
   counterTable: Table;
+  usersTable: Table;
 }
 
 export class AuctionApiStack extends Stack {
@@ -118,6 +120,34 @@ export class AuctionApiStack extends Stack {
     props.imagesBucket.grantReadWrite(exportCatalogLambda);
     props.itemsTable.grantReadData(exportCatalogLambda);
     props.imagesTable.grantReadData(exportCatalogLambda);
+
+    // Create the admin authorizer Lambda
+    const adminAuthorizerLambda = new NodejsFunction(this, 'AdminAuthorizerLambda', {
+      entry: path.join(__dirname, '..', 'src', 'authorizers', 'admin-authorizer.ts'),
+      handler: 'handler',
+      runtime: Runtime.NODEJS_LATEST,
+      environment: {
+        USERS_TABLE: props.usersTable.tableName,
+      },
+    });
+    props.usersTable.grantReadData(adminAuthorizerLambda);
+
+    // Create the admin authorizer
+    const adminAuthorizer = new HttpLambdaAuthorizer('AdminAuthorizer', adminAuthorizerLambda);
+
+    // Create the check-admin Lambda
+    const checkAdminLambda = new NodejsFunction(this, 'CheckAdminLambda', {
+      entry: path.join(__dirname, '..', 'src', 'handlers', 'check-admin.ts'),
+      handler: 'handler',
+      runtime: Runtime.NODEJS_LATEST,
+      environment: {
+        USERS_TABLE: props.usersTable.tableName,
+      },
+    });
+    props.usersTable.grantReadData(checkAdminLambda);
+
+    // Create the check-admin integration
+    const checkAdminIntegration = new HttpLambdaIntegration("CheckAdminIntegration", checkAdminLambda);
 
     // 2. Create the HTTP API
     this.httpApi = new HttpApi(this, 'AuctionServiceApi', {
@@ -236,6 +266,59 @@ export class AuctionApiStack extends Stack {
       methods: [HttpMethod.POST],
       integration: ExportCatalogIntegration,
       authorizer,
+    });
+
+    // Add admin-only routes
+    this.httpApi.addRoutes({
+      path: '/admin/users',
+      methods: [HttpMethod.GET],
+      integration: new HttpLambdaIntegration("AdminUsersIntegration", adminAuthorizerLambda),
+      authorizer: adminAuthorizer,
+    });
+
+    this.httpApi.addRoutes({
+      path: '/admin/users/{userId}',
+      methods: [HttpMethod.PUT, HttpMethod.DELETE],
+      integration: new HttpLambdaIntegration("AdminUserManagementIntegration", adminAuthorizerLambda),
+      authorizer: adminAuthorizer,
+    });
+
+    // Add admin-only auction management routes
+    this.httpApi.addRoutes({
+      path: '/admin/auctions',
+      methods: [HttpMethod.POST],
+      integration: auctionsIntegration,
+      authorizer: adminAuthorizer,
+    });
+
+    this.httpApi.addRoutes({
+      path: '/admin/auctions/{auctionId}',
+      methods: [HttpMethod.PUT, HttpMethod.DELETE],
+      integration: auctionsIntegration,
+      authorizer: adminAuthorizer,
+    });
+
+    // Add admin-only item management routes
+    this.httpApi.addRoutes({
+      path: '/admin/items',
+      methods: [HttpMethod.POST],
+      integration: itemsIntegration,
+      authorizer: adminAuthorizer,
+    });
+
+    this.httpApi.addRoutes({
+      path: '/admin/items/{itemId}',
+      methods: [HttpMethod.PUT, HttpMethod.DELETE],
+      integration: itemsIntegration,
+      authorizer: adminAuthorizer,
+    });
+
+    // Add the check-admin route
+    this.httpApi.addRoutes({
+      path: '/auth/check-admin',
+      methods: [HttpMethod.GET],
+      integration: checkAdminIntegration,
+      authorizer, // requires user to be logged in
     });
 
     // Output API endpoint
