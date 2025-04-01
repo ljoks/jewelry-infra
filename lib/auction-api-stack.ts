@@ -260,6 +260,53 @@ export class AuctionApiStack extends Stack {
       authorizer,
     });
 
+    // Batch management Lambda
+    const batchManagementLambda = new NodejsFunction(this, 'BatchManagementLambda', {
+      entry: path.join(__dirname, '..', 'src', 'handlers', 'batch-management.ts'),
+      handler: 'handler',
+      runtime: Runtime.NODEJS_18_X,
+      environment: {
+        OPENAI_SECRET_ARN: openAiSecret.secretArn,
+      },
+      timeout: Duration.seconds(30),
+      memorySize: 256,
+    });
+
+    // Grant permissions to the batch management Lambda
+    openAiSecret.grantRead(batchManagementLambda);
+
+    // Batch management integration
+    const batchManagementIntegration = new HttpLambdaIntegration("BatchManagementIntegration", batchManagementLambda);
+
+    // Batch management routes
+    this.httpApi.addRoutes({
+      path: '/batches',
+      methods: [HttpMethod.GET],
+      integration: batchManagementIntegration,
+      authorizer,
+    });
+
+    this.httpApi.addRoutes({
+      path: '/batches/{batchId}',
+      methods: [HttpMethod.GET],
+      integration: batchManagementIntegration,
+      authorizer,
+    });
+
+    this.httpApi.addRoutes({
+      path: '/batches/{batchId}/results',
+      methods: [HttpMethod.GET],
+      integration: batchManagementIntegration,
+      authorizer,
+    });
+
+    this.httpApi.addRoutes({
+      path: '/batches/{batchId}/cancel',
+      methods: [HttpMethod.POST],
+      integration: batchManagementIntegration,
+      authorizer,
+    });
+
     // Export catalog route
     this.httpApi.addRoutes({
       path: '/export/catalog',
