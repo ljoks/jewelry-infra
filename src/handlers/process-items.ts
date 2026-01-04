@@ -1,5 +1,6 @@
-import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
+import { APIGatewayProxyEventV2, APIGatewayProxyResultV2, Context } from 'aws-lambda';
 import { DynamoDB, S3, SecretsManager } from 'aws-sdk';
+import { createLogger, Logger } from '../utils/logger';
 
 const dynamodb = new DynamoDB.DocumentClient();
 const s3 = new S3();
@@ -12,6 +13,7 @@ const COUNTER_TABLE = process.env.COUNTER_TABLE || '';
 const OPENAI_SECRET_ARN = process.env.OPENAI_SECRET_ARN || '';
 
 let cachedApiKey: string | undefined;
+let handlerLogger: Logger;
 
 interface ImageInfo {
   s3Key: string;
@@ -108,32 +110,42 @@ async function generateItemId(): Promise<number> {
     ReturnValues: 'UPDATED_NEW'
   }).promise();
 
-  return response.Attributes?.count || 1;
+  const newId = response.Attributes?.count || 1;
+  handlerLogger?.debug('Generated item ID', { itemId: newId });
+  return newId;
 }
 
 async function getOpenAIKey(): Promise<string> {
   if (cachedApiKey !== undefined) {
+    handlerLogger?.debug('Using cached OpenAI API key');
     return cachedApiKey;
   }
 
+  handlerLogger?.info('Fetching OpenAI API key from Secrets Manager');
+  
   const response = await secretsManager.getSecretValue({
     SecretId: OPENAI_SECRET_ARN
   }).promise();
 
   if (!response.SecretString) {
+    handlerLogger?.error('No API key found in secret');
     throw new Error('No API key found in secret');
   }
 
   const secret = JSON.parse(response.SecretString);
   if (!secret.api_key) {
+    handlerLogger?.error('api_key field not found in secret');
     throw new Error('api_key not found in secret');
   }
 
   cachedApiKey = secret.api_key;
+  handlerLogger?.info('OpenAI API key retrieved and cached');
   return secret.api_key;
 }
 
 async function generateItemDetails(imageKeys: string[], metadata: Record<string, any> = {}): Promise<OpenAIResponse> {
+  handlerLogger?.info('Generating item details via OpenAI', { imageCount: imageKeys.length });
+  
   const apiKey = await getOpenAIKey();
 
   // Construct image URLs
@@ -190,12 +202,17 @@ Respond in this exact JSON format:
     });
 
     if (!response.ok) {
+      handlerLogger?.error('OpenAI API request failed', null, { 
+        status: response.status, 
+        statusText: response.statusText 
+      });
       throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`);
     }
 
     const data = await response.json();
     const content = data.choices?.[0]?.message?.content;
     if (!content) {
+      handlerLogger?.error('No content in OpenAI response', null, { data });
       throw new Error('No content in OpenAI response');
     }
 
@@ -220,11 +237,14 @@ Respond in this exact JSON format:
 
     result.description = `${result.description}\n\n${DISCLAIMER_PHRASE}`;
 
-    console.log(result);
+    handlerLogger?.info('Item details generated successfully', { 
+      title: result.title, 
+      valueEstimate: result.value_estimate 
+    });
 
     return result;
   } catch (error) {
-    console.error('OpenAI API error:', error);
+    handlerLogger?.error('OpenAI API error - returning fallback values', error);
     return {
       title: "Untitled Item",
       description: "Failed to generate description.",
@@ -252,9 +272,13 @@ function groupImages(images: ImageInfo[], numItems: number, viewsPerItem: number
   return groups;
 }
 
-export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+export async function handler(event: APIGatewayProxyEventV2, context?: Context): Promise<APIGatewayProxyResultV2> {
+  handlerLogger = createLogger(event, context);
+  handlerLogger.logRequest(event);
+  
   try {
     if (event.requestContext.http.method !== 'POST') {
+      handlerLogger.warn('Method not allowed', { method: event.requestContext.http.method });
       return {
         statusCode: 405,
         body: JSON.stringify({ error: 'Method not allowed' })
@@ -263,11 +287,14 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
     // Check which operation we're performing based on the path
     const path = event.requestContext.http.path;
+    handlerLogger.info('Processing items operation', { path });
+    
     if (path.endsWith('/stage')) {
       return handleStageItems(event);
     } else if (path.endsWith('/create')) {
       return handleCreateItems(event);
     } else {
+      handlerLogger.warn('Unknown operation', { path });
       return {
         statusCode: 404,
         body: JSON.stringify({ error: 'Unknown operation' })
@@ -275,7 +302,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     }
 
   } catch (error: unknown) {
-    console.error(error);
+    handlerLogger.error('Unhandled error in process-items handler', error);
     return {
       statusCode: 500,
       body: JSON.stringify({
@@ -287,10 +314,13 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 }
 
 async function handleStageItems(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  handlerLogger.info('Handling stage items request');
+  
   const body: ProcessItemsRequest = JSON.parse(event.body || '{}');
   const { num_items, views_per_item, images, metadata = {} } = body;
 
   if (!images?.length) {
+    handlerLogger.warn('No images provided for staging');
     return {
       statusCode: 400,
       body: JSON.stringify({ error: 'No images provided.' })
@@ -298,6 +328,7 @@ async function handleStageItems(event: APIGatewayProxyEventV2): Promise<APIGatew
   }
 
   if (!num_items) {
+    handlerLogger.warn('num_items not provided');
     return {
       statusCode: 400,
       body: JSON.stringify({ error: 'num_items is required.' })
@@ -305,6 +336,7 @@ async function handleStageItems(event: APIGatewayProxyEventV2): Promise<APIGatew
   }
 
   if (!views_per_item) {
+    handlerLogger.warn('views_per_item not provided');
     return {
       statusCode: 400,
       body: JSON.stringify({ error: 'views_per_item is required.' })
@@ -314,6 +346,12 @@ async function handleStageItems(event: APIGatewayProxyEventV2): Promise<APIGatew
   // Validate image count
   const expectedImages = num_items * views_per_item;
   if (images.length !== expectedImages) {
+    handlerLogger.warn('Image count mismatch', { 
+      expected: expectedImages, 
+      actual: images.length, 
+      num_items, 
+      views_per_item 
+    });
     return {
       statusCode: 400,
       body: JSON.stringify({
@@ -321,6 +359,8 @@ async function handleStageItems(event: APIGatewayProxyEventV2): Promise<APIGatew
       })
     };
   }
+
+  handlerLogger.info('Staging items', { num_items, views_per_item, imageCount: images.length });
 
   // Group images by sequence
   const groups = groupImages(images, num_items, views_per_item);
@@ -330,7 +370,10 @@ async function handleStageItems(event: APIGatewayProxyEventV2): Promise<APIGatew
   for (const group of groups) {
     const imageKeys = group.images.map(img => img.s3Key);
     
-    console.log("generating item details for item index: ", group.item_index, "with image keys: ", imageKeys);
+    handlerLogger.info('Generating item details for group', { 
+      item_index: group.item_index, 
+      imageCount: imageKeys.length 
+    });
     // Generate item details using OpenAI
     const itemDetails = await generateItemDetails(imageKeys, metadata);
 
@@ -350,6 +393,8 @@ async function handleStageItems(event: APIGatewayProxyEventV2): Promise<APIGatew
     stagedItems.push(stagedItem);
   }
 
+  handlerLogger.info('Items staged successfully', { stagedCount: stagedItems.length });
+
   return {
     statusCode: 200,
     body: JSON.stringify({
@@ -360,10 +405,13 @@ async function handleStageItems(event: APIGatewayProxyEventV2): Promise<APIGatew
 }
 
 async function handleCreateItems(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  handlerLogger.info('Handling create items request');
+  
   const body: CreateItemsRequest = JSON.parse(event.body || '{}');
   const { items, auction_id, created_by } = body;
 
   if (!items?.length) {
+    handlerLogger.warn('No items provided for creation');
     return {
       statusCode: 400,
       body: JSON.stringify({ error: 'No items provided.' })
@@ -371,11 +419,14 @@ async function handleCreateItems(event: APIGatewayProxyEventV2): Promise<APIGate
   }
 
   if (!created_by) {
+    handlerLogger.warn('created_by not provided');
     return {
       statusCode: 400,
       body: JSON.stringify({ error: 'created_by is required.' })
     };
   }
+  
+  handlerLogger.info('Creating items', { itemCount: items.length, auction_id, created_by });
 
   const createdItems = [];
   const now = Math.floor(Date.now() / 1000);
@@ -427,7 +478,10 @@ async function handleCreateItems(event: APIGatewayProxyEventV2): Promise<APIGate
     }
 
     createdItems.push(itemData);
+    handlerLogger.info('Item created', { itemId: itemData.item_id, imageCount: item.images.length });
   }
+
+  handlerLogger.info('All items created successfully', { createdCount: createdItems.length });
 
   return {
     statusCode: 201,

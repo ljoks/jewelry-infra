@@ -1,5 +1,6 @@
 import { APIGatewayProxyEventV2WithJWTAuthorizer, Context } from 'aws-lambda';
 import { DynamoDB } from 'aws-sdk';
+import { createLogger, Logger } from '../utils/logger';
 
 const dynamo = new DynamoDB.DocumentClient();
 const ITEMS_TABLE = process.env.ITEMS_TABLE!;
@@ -7,7 +8,7 @@ const AUCTIONS_TABLE = process.env.AUCTIONS_TABLE!;
 const IMAGES_TABLE = process.env.IMAGES_TABLE!;
 const COUNTER_TABLE = process.env.COUNTER_TABLE!;
 
-async function generateSequentialId(): Promise<number> {
+async function generateSequentialId(log: Logger): Promise<number> {
   try {
     // Update the counter atomically and get the new value
     const response = await dynamo.update({
@@ -26,31 +27,37 @@ async function generateSequentialId(): Promise<number> {
       ReturnValues: 'UPDATED_NEW'
     }).promise();
     
-    console.log('Generate Sequential ID response', response);
+    const newId = response.Attributes?.count || 1;
+    log.debug('Generated sequential ID', { newId });
     
     // Get the new count and return it as a number
-    return response.Attributes?.count || 1;
+    return newId;
   } catch (error) {
-    console.error('Error generating sequential ID:', error);
+    log.error('Error generating sequential ID', error);
     throw error;
   }
 }
 
 export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, context: Context) {
+  const log = createLogger(event, context);
+  
   try {
     const { routeKey, pathParameters } = event;
-    console.log(routeKey);
+    log.logRequest(event);
 
     if (routeKey === 'POST /items') {
       // Create a new item
       if (!event.body) {
+        log.warn('POST /items called without body');
         return buildResponse(400, { error: 'Request body required' });
       }
       const body = JSON.parse(event.body);
       const { auction_id, marker_id, item_title, description, created_by } = body;
 
+      log.info('Creating new item', { auction_id, marker_id, item_title, created_by });
+
       // Generate sequential ID for the item
-      const item_id = await generateSequentialId();
+      const item_id = await generateSequentialId(log);
 
       const now = new Date().toISOString();
       await dynamo.put({
@@ -67,7 +74,7 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
         },
       }).promise();
 
-      console.log('Item created', item_id);
+      log.info('Item created successfully', { item_id, auction_id });
 
       return buildResponse(201, { message: 'Item created', item_id });
     }
@@ -75,18 +82,26 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
     if (routeKey === 'GET /items/{itemId}') {
       // Get an item
       if (!pathParameters?.itemId) {
+        log.warn('GET /items/{itemId} called without itemId');
         return buildResponse(400, { error: 'Missing itemId' });
       }
+      
+      log.info('Fetching item', { itemId: pathParameters.itemId });
+      
       const resp = await dynamo.get({
         TableName: ITEMS_TABLE,
         Key: { item_id: parseInt(pathParameters.itemId, 10) }
       }).promise();
+      
+      log.info('Item fetched', { itemId: pathParameters.itemId, found: !!resp.Item });
+      
       return buildResponse(200, resp.Item);
     }
 
     if (routeKey === 'PUT /items/{itemId}') {
       // Update an item
       if (!event.body || !pathParameters?.itemId) {
+        log.warn('PUT /items/{itemId} called without body or itemId');
         return buildResponse(400, { error: 'Missing body or itemId' });
       }
       const updateBody = JSON.parse(event.body);
@@ -113,9 +128,12 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
       }
 
       if (updateExp.length === 0) {
+        log.warn('No updatable fields provided', { itemId: pathParameters.itemId });
         return buildResponse(400, { error: 'No updatable fields provided' });
       }
       updateExp.push('updated_at = :updated_at');
+
+      log.info('Updating item', { itemId: pathParameters.itemId, fields: Object.keys(attrNames) });
 
       await dynamo.update({
         TableName: ITEMS_TABLE,
@@ -125,18 +143,27 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
         ExpressionAttributeValues: attrValues,
       }).promise();
 
+      log.info('Item updated successfully', { itemId: pathParameters.itemId });
+
       return buildResponse(200, { message: 'Item updated' });
     }
 
     if (routeKey === 'DELETE /items/{itemId}') {
       // Delete an item
       if (!pathParameters?.itemId) {
+        log.warn('DELETE /items/{itemId} called without itemId');
         return buildResponse(400, { error: 'Missing itemId' });
       }
+      
+      log.info('Deleting item', { itemId: pathParameters.itemId });
+      
       await dynamo.delete({
         TableName: ITEMS_TABLE,
         Key: { item_id: parseInt(pathParameters.itemId, 10) }
       }).promise();
+      
+      log.info('Item deleted successfully', { itemId: pathParameters.itemId });
+      
       return buildResponse(200, { message: 'Item deleted' });
     }
 
@@ -146,6 +173,8 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
       const sortBy = queryParams.sortBy || 'price'; // default sort by price
       const sortOrder = queryParams.sortOrder || 'desc'; // default highest first
       const auctionId = queryParams.auctionId; // optional filter by auction
+
+      log.info('Fetching items', { sortBy, sortOrder, auctionId });
 
       let dbQuery;
 
@@ -208,6 +237,13 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
         return 0;
       });
 
+      log.info('Items fetched with images', { 
+        itemCount: items.length, 
+        sortBy, 
+        sortOrder, 
+        auctionId 
+      });
+
       return buildResponse(200, {
         items,
         count: items.length,
@@ -216,9 +252,10 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
       });
     }
 
+    log.warn('Route not found', { routeKey });
     return buildResponse(404, { error: 'Route not found' });
   } catch (err) {
-    console.error(err);
+    log.error('Unhandled error in items handler', err);
     return buildResponse(500, { error: 'Internal Server Error' });
   }
 }

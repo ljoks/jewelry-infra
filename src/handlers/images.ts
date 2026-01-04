@@ -1,5 +1,6 @@
 import { APIGatewayProxyEventV2WithJWTAuthorizer, Context } from 'aws-lambda';
 import { DynamoDB, S3 } from 'aws-sdk';
+import { createLogger } from '../utils/logger';
 
 const dynamo = new DynamoDB.DocumentClient();
 const s3 = new S3();
@@ -9,9 +10,11 @@ const ITEMS_TABLE = process.env.ITEMS_TABLE!;
 const BUCKET_NAME = process.env.BUCKET_NAME!;
 
 export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, context: Context) {
+  const log = createLogger(event, context);
+  
   try {
     const { routeKey, pathParameters } = event;
-    console.log(routeKey);
+    log.logRequest(event);
 
     if (routeKey === 'POST /images') {
       /**
@@ -24,14 +27,18 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
        * }
        */
       if (!event.body) {
+        log.warn('POST /images called without body');
         return buildResponse(400, { error: 'Request body is required.' });
       }
 
       const body = JSON.parse(event.body);
       const { image_id, item_id, auction_id } = body;
 
+      log.info('Creating presigned URL for image upload', { image_id, item_id, auction_id });
+
       // Basic validation
       if (!image_id || !item_id || !auction_id) {
+        log.warn('Missing required fields for image upload', { image_id, item_id, auction_id });
         return buildResponse(400, {
           error: 'image_id, item_id, and auction_id are required.'
         });
@@ -44,6 +51,7 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
       }).promise();
 
       if (!itemCheck.Item) {
+        log.warn('Item not found for image upload', { item_id });
         return buildResponse(400, {
           error: `Item ${item_id} not found.`
         });
@@ -51,6 +59,11 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
 
       // Optionally verify the item references the same auction_id (if stored in the Items table)
       if (itemCheck.Item.auction_id !== auction_id) {
+        log.warn('Auction ID mismatch for image upload', { 
+          item_id, 
+          expectedAuctionId: auction_id, 
+          actualAuctionId: itemCheck.Item.auction_id 
+        });
         return buildResponse(400, {
           error: `Item ${item_id} belongs to auction ${itemCheck.Item.auction_id}, not ${auction_id}.`
         });
@@ -80,6 +93,8 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
         },
       }).promise();
 
+      log.info('Presigned URL generated and image record created', { image_id, s3Key: s3KeyOriginal });
+
       return buildResponse(201, {
         message: 'Presigned URL generated',
         uploadUrl: presignedUrl,
@@ -94,14 +109,18 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
        * Retrieves the image record, optionally returning a presigned GET URL for viewing.
        */
       if (!pathParameters?.imageId) {
+        log.warn('GET /images called without imageId');
         return buildResponse(400, { error: 'Missing imageId path parameter.' });
       }
+
+      log.info('Fetching image', { imageId: pathParameters.imageId });
 
       const resp = await dynamo.get({
         TableName: IMAGES_TABLE,
         Key: { image_id: pathParameters.imageId }
       }).promise();
       if (!resp.Item) {
+        log.warn('Image not found', { imageId: pathParameters.imageId });
         return buildResponse(404, { error: 'Image not found.' });
       }
 
@@ -111,6 +130,8 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
         Key: resp.Item.s3_key_original,
         Expires: 60 * 5,
       });
+
+      log.info('Image retrieved with presigned URL', { imageId: pathParameters.imageId });
 
       return buildResponse(200, {
         ...resp.Item,
@@ -124,8 +145,11 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
        * Removes the image from DynamoDB, and optionally from S3 as well.
        */
       if (!pathParameters?.imageId) {
+        log.warn('DELETE /images called without imageId');
         return buildResponse(400, { error: 'Missing imageId path parameter.' });
       }
+
+      log.info('Deleting image', { imageId: pathParameters.imageId });
 
       // Get image info first
       const resp = await dynamo.get({
@@ -133,6 +157,7 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
         Key: { image_id: pathParameters.imageId }
       }).promise();
       if (!resp.Item) {
+        log.warn('Image not found for deletion', { imageId: pathParameters.imageId });
         return buildResponse(404, { error: 'Image not found.' });
       }
 
@@ -148,6 +173,8 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
         Key: resp.Item.s3_key_original
       }).promise();
 
+      log.info('Image deleted successfully', { imageId: pathParameters.imageId, s3Key: resp.Item.s3_key_original });
+
       return buildResponse(200, { message: 'Image deleted' });
     }
 
@@ -157,14 +184,18 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
          * Generates a presignedUrl for the frontend to be able to upload directly to s3
          */
         if (!event.body) {
+            log.warn('POST /images/getPresignedUrl called without body');
             return buildResponse(400, { error: 'Request body is required.' });
         }
 
         const body = JSON.parse(event.body);
         const { fileName, fileType } = body;
 
+        log.info('Generating presigned URL for direct upload', { fileName, fileType });
+
         // Basic validation
         if (!fileName || !fileType ) {
+            log.warn('Missing required fields for presigned URL', { fileName, fileType });
             return buildResponse(400, {
                 error: 'fileName and fileType are required.'
             });
@@ -181,12 +212,15 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
             ContentType: fileType
         });
 
+        log.info('Presigned URL generated for direct upload', { s3Key });
+
         return buildResponse(200, { presignedUrl, s3Key });
     }
 
+    log.warn('Route not found', { routeKey });
     return buildResponse(404, { error: 'Route not found.' });
   } catch (err) {
-    console.error(err);
+    log.error('Unhandled error in images handler', err);
     return buildResponse(500, { error: 'Internal Server Error' });
   }
 

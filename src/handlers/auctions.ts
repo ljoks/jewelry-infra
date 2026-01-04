@@ -1,5 +1,6 @@
 import { APIGatewayProxyEventV2WithJWTAuthorizer, Context } from 'aws-lambda';
 import { DynamoDB, S3 } from 'aws-sdk';
+import { createLogger } from '../utils/logger';
 
 const dynamo = new DynamoDB.DocumentClient();
 const s3 = new S3();
@@ -9,11 +10,12 @@ const IMAGES_TABLE = process.env.IMAGES_TABLE!;
 const BUCKET_NAME = process.env.BUCKET_NAME!;
 
 export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, context: Context) {
+  const log = createLogger(event, context);
+  
   try {
     const { routeKey, pathParameters } = event;
 
-    console.log("Full Event:", JSON.stringify(event, null, 2));
-    console.log(routeKey);
+    log.logRequest(event);
 
 
     if (routeKey === 'GET /auctions') {
@@ -48,7 +50,7 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
 
         const auctionId = pathParameters.auctionId;
 
-        console.log("auctionId: " + auctionId);
+        log.info('Fetching auction with items', { auctionId });
 
         // 1. Fetch auction details
         const auctionResult = await dynamo.get({
@@ -61,7 +63,7 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
         }
         const auction = auctionResult.Item;
         
-        console.log("auction: " + auction);
+        log.info('Auction found', { auctionId, auctionName: auction.name });
 
          // 2. Query items for this auction
         const itemsResult = await dynamo.query({
@@ -73,7 +75,7 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
     
         const items = itemsResult.Items || [];
 
-        console.log("items: " + items);
+        log.info('Items retrieved for auction', { auctionId, itemCount: items.length });
     
         // 3. Fetch images for each item
         for (let item of items) {
@@ -96,7 +98,11 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
             })) || [];
         }
         
-        console.log("items: " + items);
+        log.info('Successfully fetched auction with items and images', { 
+          auctionId, 
+          itemCount: items.length,
+          totalImages: items.reduce((sum: number, item: any) => sum + (item.images?.length || 0), 0)
+        });
 
         return buildResponse(200, { auction, items });
     }
@@ -215,19 +221,21 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
 
       try {
         const results = await Promise.all(updatePromises);
+        log.info('Items associated with auction', { auctionId, itemCount: item_ids.length });
         return buildResponse(200, { 
           message: 'Items associated with auction',
           items: results.map(result => result.Attributes)
         });
       } catch (error) {
-        console.error('Error updating items:', error);
+        log.error('Failed to update items for auction', error, { auctionId, item_ids });
         return buildResponse(500, { error: 'Failed to update some items' });
       }
     }
 
+    log.warn('Route not found', { routeKey });
     return buildResponse(404, { error: 'Route not found' });
   } catch (err) {
-    console.error(err);
+    log.error('Unhandled error in auctions handler', err);
     return buildResponse(500, { error: 'Internal Server Error' });
   }
 }

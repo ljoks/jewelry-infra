@@ -2,6 +2,7 @@ import json
 import os
 import boto3
 from typing import Dict, Any, List
+from logger import create_logger
 
 s3 = boto3.client('s3')
 BUCKET_NAME = os.environ.get('BUCKET_NAME')
@@ -41,8 +42,12 @@ def lambda_handler(event, context):
       ...
     ]
     """
+    log = create_logger(event, context)
+    log.log_request(event)
+    
     try:
         if event["requestContext"]["http"]["method"] != "POST":
+            log.warn("Method not allowed", {"method": event["requestContext"]["http"]["method"]})
             return build_response(405, {"error": "Method not allowed."})
 
         body = json.loads(event.get("body", "{}"))
@@ -50,16 +55,22 @@ def lambda_handler(event, context):
         num_items = body.get("num_items")
         views_per_item = body.get("views_per_item")
 
+        log.info("Group images request", {"num_items": num_items, "views_per_item": views_per_item, "image_count": len(images)})
+
         if not images:
+            log.warn("No images provided")
             return build_response(400, {"error": "No images provided."})
         if not num_items:
+            log.warn("num_items not provided")
             return build_response(400, {"error": "num_items is required."})
         if not views_per_item:
+            log.warn("views_per_item not provided")
             return build_response(400, {"error": "views_per_item is required."})
 
         # Validate that we have the expected number of images
         expected_images = num_items * views_per_item
         if len(images) != expected_images:
+            log.warn("Image count mismatch", {"expected": expected_images, "actual": len(images)})
             return build_response(400, {
                 "error": f"Expected {expected_images} images ({num_items} items × {views_per_item} views), but got {len(images)}."
             })
@@ -94,10 +105,12 @@ def lambda_handler(event, context):
                 "images": sorted(img_list, key=lambda x: x["index"])
             })
 
+        log.info("Images grouped successfully", {"group_count": len(result), "total_images": len(images)})
+
         return build_response(200, result)
 
     except Exception as e:
-        print(e)
+        log.error("Error grouping images", e)
         return build_response(500, {"error": "Internal server error", "detail": str(e)})
 
 def build_response(status_code: int, body: Any):

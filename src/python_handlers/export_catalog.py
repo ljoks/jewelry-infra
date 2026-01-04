@@ -3,6 +3,7 @@ import os
 import boto3
 import csv
 from io import StringIO
+from logger import create_logger
 
 # Initialize AWS clients
 dynamo = boto3.resource('dynamodb')
@@ -40,23 +41,30 @@ def lambda_handler(event, context):
         "platform": "liveauctioneers"
     }
     """
+    log = create_logger(event, context)
+    log.log_request(event)
+    
     try:
-        print("Event:", event)
-        
         if event["requestContext"]["http"]["method"] != "POST":
+            log.warn("Method not allowed", {"method": event["requestContext"]["http"]["method"]})
             return build_response(405, {"error": "Method not allowed"})
             
         body = json.loads(event.get("body", "{}"))
         auction_id = body.get("auction_id")
         platform = body.get("platform", "").lower()
         
+        log.info("Export catalog request", {"auction_id": auction_id, "platform": platform})
+        
         if not auction_id:
+            log.warn("Missing auction_id in request")
             return build_response(400, {"error": "auction_id is required"})
             
         if platform not in ["liveauctioneers"]:
+            log.warn("Unsupported platform", {"platform": platform})
             return build_response(400, {"error": "Unsupported platform. Currently only 'liveauctioneers' is supported."})
             
         # Query items for this auction
+        log.info("Querying items for auction", {"auction_id": auction_id})
         items_result = items_table.query(
             IndexName="auctionIdIndex",
             KeyConditionExpression="auction_id = :auctionId",
@@ -64,15 +72,20 @@ def lambda_handler(event, context):
         )
         
         items = items_result.get('Items', [])
+        log.info("Items retrieved", {"auction_id": auction_id, "item_count": len(items)})
+        
         if not items:
+            log.warn("No items found for auction", {"auction_id": auction_id})
             return build_response(404, {"error": f"No items found for auction {auction_id}"})
             
         # Generate CSV based on platform
+        log.info("Generating CSV for platform", {"platform": platform, "item_count": len(items)})
         if platform == "liveauctioneers":
             csv_content = generate_live_auctioneers_csv(items)
             
         # Upload CSV to S3
         csv_key = f"exports/{auction_id}/{platform}_catalog.csv"
+        log.info("Uploading CSV to S3", {"bucket": BUCKET_NAME, "key": csv_key})
         s3.put_object(
             Bucket=BUCKET_NAME,
             Key=csv_key,
@@ -87,13 +100,15 @@ def lambda_handler(event, context):
             ExpiresIn=3600  # URL valid for 1 hour
         )
         
+        log.info("Catalog exported successfully", {"auction_id": auction_id, "platform": platform, "s3_key": csv_key})
+        
         return build_response(200, {
             "message": "Catalog exported successfully",
             "download_url": presigned_url
         })
             
     except Exception as e:
-        print("Error:", e)
+        log.error("Error exporting catalog", e, {"auction_id": body.get("auction_id") if 'body' in dir() else None})
         return build_response(500, {"error": "Internal server error", "detail": str(e)})
 
 def generate_live_auctioneers_csv(items):

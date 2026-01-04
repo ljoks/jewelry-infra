@@ -1,18 +1,25 @@
 import { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { DynamoDB } from 'aws-sdk';
+import { createLogger } from '../utils/logger';
 
 const dynamo = new DynamoDB.DocumentClient();
 const USERS_TABLE = process.env.USERS_TABLE!;
 
 export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<APIGatewayProxyResultV2> {
+  const log = createLogger(event);
+  log.logRequest(event);
+  
   try {
     const userId = event.requestContext.authorizer?.jwt.claims.sub;
     if (!userId) {
+      log.warn('Unauthorized request - no userId in JWT claims');
       return {
         statusCode: 401,
         body: JSON.stringify({ error: 'Unauthorized' })
       };
     }
+
+    log.info('Checking admin status', { userId });
 
     const result = await dynamo.get({
       TableName: USERS_TABLE,
@@ -21,11 +28,14 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): P
 
     const user = result.Item;
     if (!user) {
+      log.warn('User not found in database', { userId });
       return {
         statusCode: 404,
         body: JSON.stringify({ error: 'User not found' })
       };
     }
+
+    log.info('Admin status check completed', { userId, isAdmin: user.is_admin || false });
 
     return {
       statusCode: 200,
@@ -36,7 +46,7 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): P
       })
     };
   } catch (error) {
-    console.error('Error checking admin status:', error);
+    log.error('Error checking admin status', error);
     return {
       statusCode: 500,
       body: JSON.stringify({ error: 'Internal server error' })
