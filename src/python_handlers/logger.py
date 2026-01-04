@@ -99,3 +99,4 @@ def create_logger(event: Dict[str, Any], context: Any = None) -> Logger:
     logger.init(event, context)
     return logger
 
+

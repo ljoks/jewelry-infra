@@ -10,7 +10,12 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): P
   log.logRequest(event);
   
   try {
-    const userId = event.requestContext.authorizer?.jwt.claims.sub;
+    // Get username from JWT claims (matches the user_id stored in create-user handler)
+    // Cognito stores username in 'cognito:username' or 'username' claim
+    // Note: We use username, not 'sub', because create-user stores user_id as userName
+    const userId = event.requestContext.authorizer?.jwt.claims['cognito:username'] 
+      || event.requestContext.authorizer?.jwt.claims.username;
+    
     if (!userId) {
       log.warn('Unauthorized request - no userId in JWT claims');
       return {

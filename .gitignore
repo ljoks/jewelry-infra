@@ -10,3 +10,7 @@ cdk.out
 .venv
 
 layers
+
+# Environment variables
+.env
+.env.local
