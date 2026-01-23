@@ -1,6 +1,7 @@
 import { APIGatewayProxyEventV2WithJWTAuthorizer, Context } from 'aws-lambda';
 import { DynamoDB } from 'aws-sdk';
 import { createLogger, Logger } from '../utils/logger';
+import { requireAdmin } from '../utils/admin-check';
 
 const dynamo = new DynamoDB.DocumentClient();
 const ITEMS_TABLE = process.env.ITEMS_TABLE!;
@@ -45,7 +46,12 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
     const { routeKey, pathParameters } = event;
     log.logRequest(event);
 
-    if (routeKey === 'POST /items') {
+    // Admin routes require admin privileges
+    if (routeKey === 'POST /admin/items' || routeKey === 'PUT /admin/items/{itemId}' || routeKey === 'DELETE /admin/items/{itemId}') {
+      await requireAdmin(event);
+    }
+
+    if (routeKey === 'POST /items' || routeKey === 'POST /admin/items') {
       // Create a new item
       if (!event.body) {
         log.warn('POST /items called without body');
@@ -98,8 +104,8 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
       return buildResponse(200, resp.Item);
     }
 
-    if (routeKey === 'PUT /items/{itemId}') {
-      // Update an item
+    if (routeKey === 'PUT /items/{itemId}' || routeKey === 'PUT /admin/items/{itemId}') {
+      // Update an item (regular or admin route)
       if (!event.body || !pathParameters?.itemId) {
         log.warn('PUT /items/{itemId} called without body or itemId');
         return buildResponse(400, { error: 'Missing body or itemId' });
@@ -148,8 +154,8 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
       return buildResponse(200, { message: 'Item updated' });
     }
 
-    if (routeKey === 'DELETE /items/{itemId}') {
-      // Delete an item
+    if (routeKey === 'DELETE /items/{itemId}' || routeKey === 'DELETE /admin/items/{itemId}') {
+      // Delete an item (regular or admin route)
       if (!pathParameters?.itemId) {
         log.warn('DELETE /items/{itemId} called without itemId');
         return buildResponse(400, { error: 'Missing itemId' });

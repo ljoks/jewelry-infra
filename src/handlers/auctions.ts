@@ -1,6 +1,7 @@
 import { APIGatewayProxyEventV2WithJWTAuthorizer, Context } from 'aws-lambda';
 import { DynamoDB, S3 } from 'aws-sdk';
 import { createLogger } from '../utils/logger';
+import { requireAdmin } from '../utils/admin-check';
 
 const dynamo = new DynamoDB.DocumentClient();
 const s3 = new S3();
@@ -107,8 +108,13 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
         return buildResponse(200, { auction, items });
     }
 
-    if (routeKey === 'POST /auctions') {
-      // Create an auction
+    // Admin routes require admin privileges
+    if (routeKey === 'POST /admin/auctions' || routeKey === 'PUT /admin/auctions/{auctionId}' || routeKey === 'DELETE /admin/auctions/{auctionId}') {
+      await requireAdmin(event);
+    }
+
+    if (routeKey === 'POST /auctions' || routeKey === 'POST /admin/auctions') {
+      // Create an auction (regular or admin route)
       if (!event.body) {
         return buildResponse(400, { error: 'Body is required' });
       }
@@ -137,8 +143,8 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
       return buildResponse(201, { message: 'Auction created', auction_id });
     }
 
-    if (routeKey === 'PUT /auctions/{auctionId}') {
-      // Update an auction
+    if (routeKey === 'PUT /auctions/{auctionId}' || routeKey === 'PUT /admin/auctions/{auctionId}') {
+      // Update an auction (regular or admin route)
       if (!event.body || !pathParameters?.auctionId) {
         return buildResponse(400, { error: 'Missing body or auctionId' });
       }
@@ -168,8 +174,8 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer, co
       return buildResponse(200, { message: 'Auction updated' });
     }
 
-    if (routeKey === 'DELETE /auctions/{auctionId}') {
-      // Delete an auction
+    if (routeKey === 'DELETE /auctions/{auctionId}' || routeKey === 'DELETE /admin/auctions/{auctionId}') {
+      // Delete an auction (regular or admin route)
       if (!pathParameters?.auctionId) {
         return buildResponse(400, { error: 'Missing auctionId' });
       }

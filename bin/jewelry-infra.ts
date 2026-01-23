@@ -32,5 +32,6 @@ new AuctionApiStack(app, 'AuctionApiStack', {
   userPoolClient: authStack.userPoolClient,
   counterTable: backendStack.counterTable,
   usersTable: backendStack.usersTable,
+  metadataOptionsTable: backendStack.metadataOptionsTable,
   env
 });

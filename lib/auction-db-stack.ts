@@ -12,6 +12,7 @@ export class AuctionDBStack extends Stack {
   public readonly imagesTable: Table;
   public readonly usersTable: Table;
   public readonly counterTable: Table;
+  public readonly metadataOptionsTable: Table;
   public readonly imagesBucket: Bucket;
   public readonly createItemFunction: Function;
 
@@ -107,6 +108,14 @@ export class AuctionDBStack extends Stack {
       tableName: 'ItemCounters',
       partitionKey: { name: 'counter_name', type: AttributeType.STRING },
       sortKey: { name: 'counter_type', type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      removalPolicy: RemovalPolicy.DESTROY, // Dev only
+    });
+
+    // Metadata Options Table - stores admin-configurable metadata options
+    this.metadataOptionsTable = new Table(this, 'MetadataOptionsTable', {
+      tableName: 'MetadataOptions',
+      partitionKey: { name: 'config_key', type: AttributeType.STRING },
       billingMode: BillingMode.PAY_PER_REQUEST,
       removalPolicy: RemovalPolicy.DESTROY, // Dev only
     });
