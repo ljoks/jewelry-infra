@@ -3,7 +3,6 @@ import { Construct } from 'constructs';
 import { HttpApi, HttpMethod, CorsHttpMethod } from '@aws-cdk/aws-apigatewayv2-alpha';
 import { HttpLambdaIntegration } from '@aws-cdk/aws-apigatewayv2-integrations-alpha';
 import { HttpUserPoolAuthorizer, HttpUserPoolAuthorizerProps } from '@aws-cdk/aws-apigatewayv2-authorizers-alpha';
-import { HttpLambdaAuthorizer } from '@aws-cdk/aws-apigatewayv2-authorizers-alpha';
 
 import { Table } from 'aws-cdk-lib/aws-dynamodb';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
@@ -24,6 +23,7 @@ interface AuctionApiStackProps extends StackProps {
   userPoolClient: UserPoolClient;
   counterTable: Table;
   usersTable: Table;
+  metadataOptionsTable: Table;
 }
 
 export class AuctionApiStack extends Stack {
@@ -42,13 +42,15 @@ export class AuctionApiStack extends Stack {
         AUCTIONS_TABLE: props.auctionsTable.tableName,
         ITEMS_TABLE: props.itemsTable.tableName,
         IMAGES_TABLE: props.imagesTable.tableName,
-        BUCKET_NAME: props.imagesBucket.bucketName
+        BUCKET_NAME: props.imagesBucket.bucketName,
+        USERS_TABLE: props.usersTable.tableName,
       },
     });
     props.auctionsTable.grantReadWriteData(auctionsLambda);
     props.imagesBucket.grantRead(auctionsLambda);
     props.itemsTable.grantReadWriteData(auctionsLambda);
     props.imagesTable.grantReadData(auctionsLambda);
+    props.usersTable.grantReadData(auctionsLambda);
 
     // Items Lambda
     const itemsLambda = new NodejsFunction(this, 'ItemsLambda', {
@@ -59,13 +61,15 @@ export class AuctionApiStack extends Stack {
         ITEMS_TABLE: props.itemsTable.tableName,
         AUCTIONS_TABLE: props.auctionsTable.tableName,
         IMAGES_TABLE: props.imagesTable.tableName,
-        COUNTER_TABLE: props.counterTable.tableName
+        COUNTER_TABLE: props.counterTable.tableName,
+        USERS_TABLE: props.usersTable.tableName,
       },
     });
     props.itemsTable.grantReadWriteData(itemsLambda);
     props.auctionsTable.grantReadData(itemsLambda);
     props.imagesTable.grantReadData(itemsLambda);
     props.counterTable.grantReadWriteData(itemsLambda);
+    props.usersTable.grantReadData(itemsLambda);
 
     // Images Lambda
     const imagesLambda = new NodejsFunction(this, 'ImagesLambda', {
@@ -121,20 +125,6 @@ export class AuctionApiStack extends Stack {
     props.itemsTable.grantReadData(exportCatalogLambda);
     props.imagesTable.grantReadData(exportCatalogLambda);
 
-    // Create the admin authorizer Lambda
-    const adminAuthorizerLambda = new NodejsFunction(this, 'AdminAuthorizerLambda', {
-      entry: path.join(__dirname, '..', 'src', 'authorizers', 'admin-authorizer.ts'),
-      handler: 'handler',
-      runtime: Runtime.NODEJS_LATEST,
-      environment: {
-        USERS_TABLE: props.usersTable.tableName,
-      },
-    });
-    props.usersTable.grantReadData(adminAuthorizerLambda);
-
-    // Create the admin authorizer
-    const adminAuthorizer = new HttpLambdaAuthorizer('AdminAuthorizer', adminAuthorizerLambda);
-
     // Create the check-admin Lambda
     const checkAdminLambda = new NodejsFunction(this, 'CheckAdminLambda', {
       entry: path.join(__dirname, '..', 'src', 'handlers', 'check-admin.ts'),
@@ -148,6 +138,36 @@ export class AuctionApiStack extends Stack {
 
     // Create the check-admin integration
     const checkAdminIntegration = new HttpLambdaIntegration("CheckAdminIntegration", checkAdminLambda);
+
+    // Create the metadata-options Lambda
+    const metadataOptionsLambda = new NodejsFunction(this, 'MetadataOptionsLambda', {
+      entry: path.join(__dirname, '..', 'src', 'handlers', 'metadata-options.ts'),
+      handler: 'handler',
+      runtime: Runtime.NODEJS_LATEST,
+      environment: {
+        METADATA_OPTIONS_TABLE: props.metadataOptionsTable.tableName,
+        USERS_TABLE: props.usersTable.tableName,
+      },
+    });
+    props.metadataOptionsTable.grantReadWriteData(metadataOptionsLambda);
+    props.usersTable.grantReadData(metadataOptionsLambda);
+
+    // Create the metadata-options integration
+    const metadataOptionsIntegration = new HttpLambdaIntegration("MetadataOptionsIntegration", metadataOptionsLambda);
+
+    // Create the admin-users Lambda
+    const adminUsersLambda = new NodejsFunction(this, 'AdminUsersLambda', {
+      entry: path.join(__dirname, '..', 'src', 'handlers', 'admin-users.ts'),
+      handler: 'handler',
+      runtime: Runtime.NODEJS_LATEST,
+      environment: {
+        USERS_TABLE: props.usersTable.tableName,
+      },
+    });
+    props.usersTable.grantReadWriteData(adminUsersLambda);
+
+    // Create the admin-users integration
+    const adminUsersIntegration = new HttpLambdaIntegration("AdminUsersIntegration", adminUsersLambda);
 
     // 2. Create the HTTP API
     this.httpApi = new HttpApi(this, 'AuctionServiceApi', {
@@ -269,18 +289,20 @@ export class AuctionApiStack extends Stack {
     });
 
     // Add admin-only routes
+    // All admin routes use Cognito JWT authorizer for authentication
+    // Authorization (admin check) is done in handlers using requireAdmin utility
     this.httpApi.addRoutes({
       path: '/admin/users',
       methods: [HttpMethod.GET],
-      integration: new HttpLambdaIntegration("AdminUsersIntegration", adminAuthorizerLambda),
-      authorizer: adminAuthorizer,
+      integration: adminUsersIntegration,
+      authorizer, // Cognito JWT authorizer - just checks if user is authenticated
     });
 
     this.httpApi.addRoutes({
       path: '/admin/users/{userId}',
       methods: [HttpMethod.PUT, HttpMethod.DELETE],
-      integration: new HttpLambdaIntegration("AdminUserManagementIntegration", adminAuthorizerLambda),
-      authorizer: adminAuthorizer,
+      integration: adminUsersIntegration,
+      authorizer, // Cognito JWT authorizer - just checks if user is authenticated
     });
 
     // Add admin-only auction management routes
@@ -288,14 +310,14 @@ export class AuctionApiStack extends Stack {
       path: '/admin/auctions',
       methods: [HttpMethod.POST],
       integration: auctionsIntegration,
-      authorizer: adminAuthorizer,
+      authorizer, // Cognito JWT authorizer - just checks if user is authenticated
     });
 
     this.httpApi.addRoutes({
       path: '/admin/auctions/{auctionId}',
       methods: [HttpMethod.PUT, HttpMethod.DELETE],
       integration: auctionsIntegration,
-      authorizer: adminAuthorizer,
+      authorizer, // Cognito JWT authorizer - just checks if user is authenticated
     });
 
     // Add admin-only item management routes
@@ -303,14 +325,22 @@ export class AuctionApiStack extends Stack {
       path: '/admin/items',
       methods: [HttpMethod.POST],
       integration: itemsIntegration,
-      authorizer: adminAuthorizer,
+      authorizer, // Cognito JWT authorizer - just checks if user is authenticated
     });
 
     this.httpApi.addRoutes({
       path: '/admin/items/{itemId}',
       methods: [HttpMethod.PUT, HttpMethod.DELETE],
       integration: itemsIntegration,
-      authorizer: adminAuthorizer,
+      authorizer, // Cognito JWT authorizer - just checks if user is authenticated
+    });
+
+    // Add admin-only metadata options routes
+    this.httpApi.addRoutes({
+      path: '/admin/metadata-options',
+      methods: [HttpMethod.GET, HttpMethod.PUT],
+      integration: metadataOptionsIntegration,
+      authorizer, // Cognito JWT authorizer - just checks if user is authenticated
     });
 
     // Add the check-admin route
