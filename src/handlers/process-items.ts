@@ -189,7 +189,7 @@ Respond in this exact JSON format:
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: "gpt-5-mini",
         messages: [{
           role: "user",
           content: [
@@ -197,16 +197,38 @@ Respond in this exact JSON format:
             ...imageUrls
           ]
         }],
-        max_tokens: 1000
+        max_completion_tokens: 1000
       })
     });
 
     if (!response.ok) {
+      // Read the error response body to get detailed error information
+      let errorBody: any = null;
+      try {
+        const errorText = await response.text();
+        try {
+          errorBody = JSON.parse(errorText);
+        } catch {
+          errorBody = errorText;
+        }
+      } catch (e) {
+        handlerLogger?.warn('Failed to read error response body', e);
+      }
+      
       handlerLogger?.error('OpenAI API request failed', null, { 
         status: response.status, 
-        statusText: response.statusText 
+        statusText: response.statusText,
+        errorBody: errorBody,
+        requestBody: {
+          model: "gpt-5-mini",
+          messageCount: 1,
+          imageCount: imageUrls.length,
+          maxCompletionTokens: 1000
+        }
       });
-      throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`);
+      
+      const errorMessage = errorBody?.error?.message || errorBody?.message || response.statusText;
+      throw new Error(`OpenAI API error: ${response.status} ${response.statusText} - ${errorMessage}`);
     }
 
     const data = await response.json();
